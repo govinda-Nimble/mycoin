@@ -1,0 +1,39 @@
+{
+    "$schema": "https://antigravity.google/schemas/v1/settings.json",
+    "agentMode": "accept-edits",
+    "toolPermission": "proceed-in-sandbox",
+    "enableTerminalSandbox": true,
+    "allowNonWorkspaceAccess": false,
+    "permissions": {
+        "deny": [
+            "read_file(.env)",
+            "read_file(.env.local)",
+            "read_file(.env.development)",
+            "read_file(.env.production)",
+            "read_file(.env.test)",
+            "command(git add)",
+            "command(git commit)",
+            "command(git push)",
+            "command(git pull)",
+            "command(git reset)",
+            "command(git checkout)",
+            "command(git switch)",
+            "command(git merge)",
+            "command(git rebase)",
+            "command(git stash)",
+            "command(git clean)",
+            "command(git cherry-pick)",
+            "command(python manage.py makemigrations)",
+            "command(python manage.py migrate)",
+            "command(python manage.py makemigrations --check)",
+            "command(python.exe manage.py makemigrations)",
+            "command(python.exe manage.py migrate)",
+            "command(py manage.py makemigrations)",
+            "command(py manage.py migrate)",
+            "command(py -3 manage.py makemigrations)",
+            "command(py -3 manage.py migrate)",
+            "command(python -m django makemigrations)",
+            "command(python -m django migrate)"
+        ]
+    }
+}

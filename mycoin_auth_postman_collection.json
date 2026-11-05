@@ -1,0 +1,278 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "MyCoin Auth API",
+    "description": "Postman Collection for MyCoin authentication APIs (Registration, Login with OTP, Token Refresh, and Logout) adhering to the D-A-I-C-V architecture.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8000",
+      "type": "string",
+      "description": "Base URL of the Django development server"
+    },
+    {
+      "key": "first_name",
+      "value": "Govinda",
+      "type": "string"
+    },
+    {
+      "key": "last_name",
+      "value": "Dev",
+      "type": "string"
+    },
+    {
+      "key": "email",
+      "value": "govinda.dev@example.com",
+      "type": "string"
+    },
+    {
+      "key": "otp",
+      "value": "111111",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string",
+      "description": "Automatically populated on successful OTP verification"
+    },
+    {
+      "key": "refresh_token",
+      "value": "",
+      "type": "string",
+      "description": "Automatically populated on successful OTP verification"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Registration Flow",
+      "item": [
+        {
+          "name": "1.1 Request Registration OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"{{first_name}}\",\n  \"lastName\": \"{{last_name}}\",\n  \"email\": \"{{email}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "register", ""]
+            },
+            "description": "Initiates user registration by validating email uniqueness and issuing a 6-digit registration OTP (default: 111111)."
+          },
+          "response": []
+        },
+        {
+          "name": "1.2 Verify Registration OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    if (json.data && json.data.tokens) {",
+                  "        if (json.data.tokens.access) {",
+                  "            pm.collectionVariables.set(\"access_token\", json.data.tokens.access);",
+                  "            console.log(\"Saved access_token:\", json.data.tokens.access);",
+                  "        }",
+                  "        if (json.data.tokens.refresh) {",
+                  "            pm.collectionVariables.set(\"refresh_token\", json.data.tokens.refresh);",
+                  "            console.log(\"Saved refresh_token:\", json.data.tokens.refresh);",
+                  "        }",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"{{first_name}}\",\n  \"lastName\": \"{{last_name}}\",\n  \"email\": \"{{email}}\",\n  \"otp\": \"{{otp}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register/verify-otp/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "register", "verify-otp", ""]
+            },
+            "description": "Verifies the registration OTP, creates the User model, links the OTP record to the created user, and returns JWT tokens (auto-saved to collection variables)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Login Flow",
+      "item": [
+        {
+          "name": "2.1 Request Login OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "login", ""]
+            },
+            "description": "Verifies that the user exists and is active, then generates and sends a 6-digit login OTP (default: 111111)."
+          },
+          "response": []
+        },
+        {
+          "name": "2.2 Verify Login OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    if (json.data && json.data.tokens) {",
+                  "        if (json.data.tokens.access) {",
+                  "            pm.collectionVariables.set(\"access_token\", json.data.tokens.access);",
+                  "            console.log(\"Saved access_token:\", json.data.tokens.access);",
+                  "        }",
+                  "        if (json.data.tokens.refresh) {",
+                  "            pm.collectionVariables.set(\"refresh_token\", json.data.tokens.refresh);",
+                  "            console.log(\"Saved refresh_token:\", json.data.tokens.refresh);",
+                  "        }",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"otp\": \"{{otp}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login/verify-otp/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "login", "verify-otp", ""]
+            },
+            "description": "Verifies the login OTP, updates the user's last login, and returns fresh JWT tokens (auto-saved to collection variables)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Token & Session Management",
+      "item": [
+        {
+          "name": "3.1 Refresh Access Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var json = pm.response.json();",
+                  "    if (json.data && json.data.tokens) {",
+                  "        if (json.data.tokens.access) {",
+                  "            pm.collectionVariables.set(\"access_token\", json.data.tokens.access);",
+                  "            console.log(\"Updated access_token:\", json.data.tokens.access);",
+                  "        }",
+                  "        if (json.data.tokens.refresh) {",
+                  "            pm.collectionVariables.set(\"refresh_token\", json.data.tokens.refresh);",
+                  "            console.log(\"Updated refresh_token:\", json.data.tokens.refresh);",
+                  "        }",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/refresh-token/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "refresh-token", ""]
+            },
+            "description": "Issues a brand new access token (and optionally rotated refresh token) using the active refresh token. Auto-updates collection variables."
+          },
+          "response": []
+        },
+        {
+          "name": "3.2 Logout (Revoke Token)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}",
+                "description": "Optional Bearer header"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/logout/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "logout", ""]
+            },
+            "description": "Revokes the active refresh token by adding its JTI to the blacklist table, ending the user's session."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
+
