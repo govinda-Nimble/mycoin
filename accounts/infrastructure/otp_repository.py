@@ -30,7 +30,7 @@ class DjangoOTPRepository:
             otp_record.isVerified = False
             otp_record.verifiedAt = None
             otp_record.save(
-                update_fields=["otp", "expiresAt", "attempts", "isVerified", "verifiedAt", "updated_at"]
+                update_fields=["otp", "expiresAt", "attempts", "isVerified", "verifiedAt", "updatedAt"]
             )
 
         return otp_record
@@ -58,7 +58,7 @@ class DjangoOTPRepository:
             otp_record.isVerified = False
             otp_record.verifiedAt = None
             otp_record.save(
-                update_fields=["user", "otp", "expiresAt", "attempts", "isVerified", "verifiedAt", "updated_at"]
+                update_fields=["user", "otp", "expiresAt", "attempts", "isVerified", "verifiedAt", "updatedAt"]
             )
 
         return otp_record
@@ -84,4 +84,4 @@ class DjangoOTPRepository:
 
     def increment_attempts(self, *, otp_record: UserOTP) -> None:
         otp_record.attempts += 1
-        otp_record.save(update_fields=["attempts", "updated_at"])
+        otp_record.save(update_fields=["attempts", "updatedAt"])
