@@ -221,6 +221,7 @@ class RefreshTokenAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        print("55555555555555")
         result = use_case.execute(
             refresh_token=serializer.validated_data["refresh"],
             client_ip=get_client_ip(request),

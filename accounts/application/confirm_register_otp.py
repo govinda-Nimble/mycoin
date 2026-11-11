@@ -100,10 +100,16 @@ class ConfirmRegisterOtpUseCase:
             is_email_verified=True,
         )
 
-        # 5. Provision Wallet for the registered user
+        # 5. Provision Wallet & On-Chain Account with Registration Bonus
         wallet = None
+        account = None
         if self._wallet_creator:
             wallet = self._wallet_creator.create_wallet_for_user(user)
+            if wallet and hasattr(self._wallet_creator, "create_account_for_wallet"):
+                try:
+                    account = self._wallet_creator.create_account_for_wallet(user=user, wallet=wallet)
+                except Exception:
+                    account = None
 
         # 6. Link OTP record to the created user and mark verified
         self._otps.mark_otp_verified(otp_record=otp_record, user=user)
@@ -130,6 +136,16 @@ class ConfirmRegisterOtpUseCase:
                 "id": str(wallet.id),
                 "address": wallet.address,
                 "publicKey": wallet.publicKey,
+            }
+
+        if account:
+            response_data["accountData"] = {
+                "id": str(account.id),
+                "address": account.address,
+                "balance": str(account.balance),
+                "bonusAmount": "100 MYC",
+                "accountType": account.accountType,
+                "status": account.status,
             }
 
         return UseCaseResult(

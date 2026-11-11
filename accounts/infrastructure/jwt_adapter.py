@@ -12,7 +12,6 @@ class DjangoJWTAdapter:
 
     def create_token_pair_for_user(self, user: Any) -> dict[str, Any]:
         user_id = str(user.id)
-        
         try:
             OutstandingToken.objects.filter(user_id=user_id).delete()
         except Exception as e:
@@ -43,14 +42,12 @@ class DjangoJWTAdapter:
             token = RefreshToken(refresh_token)
             user_id = token.get('user_id')
             jti = token.get('jti')
-
             if not user_id:
                 return UseCaseResult(
                         success=False,
                         reason="Invalid refresh token.",
                         status_code=400,
                     )
-        
             # if not OutstandingToken.objects.filter(
             #     jti=jti,
             #     user_id=user_id,
@@ -61,7 +58,6 @@ class DjangoJWTAdapter:
             #         reason="Invalid or expired refresh token.",
             #         status_code=401,
             #     )
-
             user = User.objects.get(id=user_id)
             if not user.is_active:
                 return UseCaseResult(
@@ -69,7 +65,6 @@ class DjangoJWTAdapter:
                     reason="User account is not active.",
                     status_code=403,
                 )
-
             return self.create_token_pair_for_user(user=user)
             
         except User.DoesNotExist:

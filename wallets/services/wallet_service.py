@@ -6,14 +6,18 @@ For the centralized prototype, private keys are securely retained in `keyReferen
 so the backend can sign future on-chain transactions without a frontend key-manager.
 """
 
+from decimal import Decimal
 import hashlib
 import logging
-from typing import Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from django.db import transaction
+from django.utils import timezone
 import ecdsa
 
-from wallets.models import Wallet, WalletStatus, WalletType
+from ledger.models import MempoolStatus, MempoolTransaction, TransactionStatus
+from network.models import Blockchain, BlockchainStatus
+from wallets.models import Account, Wallet, WalletStatus, WalletType
 
 logger = logging.getLogger(__name__)
 
@@ -81,4 +85,89 @@ def create_wallet_for_user(user: Any, name: str = "") -> Wallet:
 
         logger.info("Created wallet %s for user %s", wallet.address, user.email)
         return wallet
+
+
+def format_coin_amount(amount: int, decimals: int = 8) -> str:
+    """Formats an integer amount in smallest units into a human-readable decimal string."""
+    dec_val = Decimal(amount) / (Decimal(10) ** decimals)
+    return f"{dec_val:.{decimals}f}"
+
+
+def get_account_balance(
+    *,
+    user: Optional[Any] = None,
+    address: Optional[str] = None,
+    chain_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Retrieves the finalized balance, available balance (accounting for active pending mempool txs),
+    nonce, and network facts for an authenticated user or target address.
+
+    Returns:
+        Dict[str, Any] with camelCase keys.
+    """
+    # 1. Resolve Blockchain
+    if chain_id is not None:
+        blockchain = Blockchain.objects.filter(chainId=chain_id).first()
+        if not blockchain:
+            raise ValueError(f"Blockchain with chain ID {chain_id} does not exist.")
+    else:
+        blockchain = Blockchain.objects.filter(status=BlockchainStatus.ACTIVE).first()
+        if not blockchain:
+            raise ValueError("No active blockchain network configured.")
+
+    # 2. Resolve target Address
+    target_address = address
+    if not target_address:
+        if not user or not user.is_authenticated:
+            raise ValueError("Authenticated user or address parameter is required.")
+        wallet = Wallet.objects.filter(user=user, status=WalletStatus.ACTIVE).first()
+        if not wallet:
+            raise ValueError("User does not have an active wallet.")
+        target_address = wallet.address
+
+    target_address = target_address.strip().lower()
+
+    # 3. Query Account record on the targeted blockchain
+    account = Account.objects.filter(blockchain=blockchain, address=target_address).first()
+
+    balance = account.balance if account else 0
+    nonce = account.nonce if account else 0
+    account_status = account.status if account else "ACTIVE"
+
+    # 4. Check for active pending transactions in the mempool
+    now = timezone.now()
+    active_mempool_qs = MempoolTransaction.objects.filter(
+        status=MempoolStatus.ACTIVE,
+        expiresAt__gt=now,
+        transaction__status=TransactionStatus.PENDING,
+        transaction__block__isnull=True,
+        transaction__blockchain=blockchain,
+        transaction__sender__address=target_address,
+    ).select_related("transaction")
+
+    pending_count = active_mempool_qs.count()
+    pending_deductions = 0
+    if pending_count > 0:
+        for mtx in active_mempool_qs:
+            tx = mtx.transaction
+            fee = tx.gasLimit * tx.gasPrice
+            pending_deductions += (tx.amount + fee)
+
+    available_balance = max(0, balance - pending_deductions)
+
+    return {
+        "address": target_address,
+        "balance": balance,
+        "balanceFormatted": format_coin_amount(balance, blockchain.decimals),
+        "availableBalance": available_balance,
+        "availableBalanceFormatted": format_coin_amount(available_balance, blockchain.decimals),
+        "pendingTransactionsCount": pending_count,
+        "symbol": blockchain.symbol,
+        "decimals": blockchain.decimals,
+        "nonce": nonce,
+        "chainId": blockchain.chainId,
+        "networkName": blockchain.name,
+        "status": account_status,
+    }
 

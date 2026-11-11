@@ -101,7 +101,10 @@ class ActivityRecorder(Protocol):
 
 
 class WalletCreator(Protocol):
-    """Abstract contract for creating a blockchain wallet for a user."""
+    """Abstract contract for creating a blockchain wallet and provisioning on-chain account for a user."""
 
     def create_wallet_for_user(self, user: Any) -> Any:
+        ...
+
+    def create_account_for_wallet(self, user: Any, wallet: Any) -> Any:
         ...

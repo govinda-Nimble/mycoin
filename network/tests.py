@@ -17,6 +17,7 @@ Covers all 13 required test cases:
 13. Existing inconsistent genesis data causes a safe failure.
 """
 
+from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
@@ -315,3 +316,163 @@ class InitializeBlockchainTests(TestCase):
         output2 = out2.getvalue()
         self.assertIn("Blockchain is already initialized and verified.", output2)
         self.assertIn("ALREADY FINALIZED", output2)
+
+
+class NodeSeederTestCase(TestCase):
+    """Unit and integration tests for seeding Node with nodeType=VALIDATOR and status=ONLINE."""
+
+    def setUp(self):
+        # Initialize an active blockchain
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_result = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_result.blockchain
+
+    def test_seed_validator_node_service_success(self):
+        """Verify seeding creates Node, Validator, Account, Wallet, and Stake successfully."""
+        from network.services.node_seeder import seed_validator_node
+
+        result = seed_validator_node(
+            node_id="myc-val-node-001",
+            endpoint="http://localhost:8001",
+            operator_email="val-operator@mycoin.network",
+            stake_amount_myc=1500,
+            commission_percent=Decimal("5.00"),
+            node_status="ONLINE",
+        )
+
+        node = result.node
+        self.assertEqual(node.nodeId, "myc-val-node-001")
+        self.assertEqual(node.nodeType, "VALIDATOR")
+        self.assertEqual(node.status, "ONLINE")
+        self.assertEqual(node.endpoint, "http://localhost:8001")
+        self.assertIsNotNone(node.lastHeartbeat)
+        self.assertTrue(node.p2pPublicKey)
+
+        # Validator checks
+        validator = result.validator
+        self.assertEqual(node.validator, validator)
+        self.assertEqual(validator.status, "ACTIVE")
+        self.assertIsNotNone(validator.activatedAt)
+        self.assertEqual(validator.totalStake, 1500 * (10 ** self.blockchain.decimals))
+        self.assertEqual(validator.commissionPercent, Decimal("5.00"))
+
+        # Account checks
+        account = result.account
+        self.assertEqual(account.accountType, "EOA")
+        self.assertEqual(validator.account, account)
+        self.assertEqual(account.address, result.wallet.address)
+
+        # Ledger & Total Supply Conservation checks
+        from network.services.genesis import VALIDATOR_RESERVE_ADDRESS
+        from wallets.models import Account
+        reserve = Account.objects.get(blockchain=self.blockchain, address=VALIDATOR_RESERVE_ADDRESS)
+        # 300,000 MYC - 1,600 MYC (1,500 stake + 100 buffer) = 298,400 MYC
+        expected_reserve_units = (300000 - 1600) * (10 ** self.blockchain.decimals)
+        self.assertEqual(reserve.balance, expected_reserve_units)
+
+        # Total on-chain coin supply across all accounts remains strictly 1,000,000 MYC
+        total_balance = sum(acc.balance for acc in Account.objects.filter(blockchain=self.blockchain))
+        self.assertEqual(total_balance, self.genesis_config.initial_supply_smallest_units)
+
+        # Block & Transaction checks
+        self.assertIsNotNone(result.funding_block)
+        self.assertEqual(result.funding_block.height, 1)
+        self.assertEqual(result.funding_block.status, "FINALIZED")
+        self.assertEqual(self.blockchain.latestFinalizedBlock, result.funding_block)
+
+        self.assertIsNotNone(result.funding_transaction)
+        self.assertEqual(result.funding_transaction.status, "FINALIZED")
+        self.assertEqual(result.funding_transaction.sender, reserve)
+        self.assertEqual(result.funding_transaction.receiver, account)
+
+        # Stake checks
+        from staking.models import Stake
+        stake = Stake.objects.filter(validator=validator).first()
+        self.assertIsNotNone(stake)
+        self.assertEqual(stake.amount, validator.totalStake)
+        self.assertEqual(stake.status, "ACTIVE")
+        self.assertEqual(stake.stakeTransaction, result.funding_transaction)
+
+    def test_seed_validator_node_idempotency(self):
+        """Verify running seeder twice updates existing records without duplicate errors."""
+        from network.models import Node
+        from network.services.node_seeder import seed_validator_node
+
+        res1 = seed_validator_node(
+            node_id="myc-val-idem-001",
+            endpoint="http://localhost:8002",
+            node_status="ONLINE",
+        )
+        self.assertTrue(res1.created)
+
+        # Second execution with updated endpoint/stake
+        res2 = seed_validator_node(
+            node_id="myc-val-idem-001",
+            endpoint="http://localhost:8002",
+            node_status="ONLINE",
+            stake_amount_myc=2000,
+        )
+        self.assertFalse(res2.created)
+        self.assertEqual(res2.node.id, res1.node.id)
+        self.assertEqual(Node.objects.filter(nodeId="myc-val-idem-001").count(), 1)
+        self.assertEqual(res2.validator.totalStake, 2000 * (10 ** self.blockchain.decimals))
+
+    def test_seed_validator_node_management_command(self):
+        """Verify python manage.py seed_validator_node CLI output and execution."""
+        from network.models import Node
+
+        out = StringIO()
+        call_command(
+            "seed_validator_node",
+            "--node-id", "myc-val-cli-001",
+            "--endpoint", "http://localhost:8003",
+            "--status", "ONLINE",
+            "--stake", "1200",
+            stdout=out,
+        )
+        output = out.getvalue()
+        self.assertIn("[SUCCESS]", output)
+        self.assertIn("myc-val-cli-001", output)
+        self.assertIn("nodeType=VALIDATOR", output)
+        self.assertIn("status=ONLINE", output)
+
+        node = Node.objects.get(nodeId="myc-val-cli-001")
+        self.assertEqual(node.nodeType, "VALIDATOR")
+        self.assertEqual(node.status, "ONLINE")
+
+    def test_seed_node_management_command_default(self):
+        """Verify python manage.py seed_node defaults to VALIDATOR and ONLINE."""
+        from network.models import Node
+
+        out = StringIO()
+        call_command(
+            "seed_node",
+            "--node-id", "myc-default-001",
+            "--endpoint", "http://localhost:8004",
+            stdout=out,
+        )
+        output = out.getvalue()
+        self.assertIn("[SUCCESS]", output)
+        self.assertIn("myc-default-001", output)
+
+        node = Node.objects.get(nodeId="myc-default-001")
+        self.assertEqual(node.nodeType, "VALIDATOR")
+        self.assertEqual(node.status, "ONLINE")
+        self.assertIsNotNone(node.validator)
+
+    def test_seed_validator_node_without_blockchain_fails(self):
+        """Verify error is raised when no active blockchain exists."""
+        from network.models import Blockchain
+        from network.services.node_seeder import NodeSeederError, seed_validator_node
+
+        # Temporarily deactivate blockchain
+        self.blockchain.status = "HALTED"
+        self.blockchain.save()
+
+        with self.assertRaises(NodeSeederError) as ctx:
+            seed_validator_node(
+                node_id="myc-fail-001",
+                endpoint="http://localhost:8999",
+            )
+        self.assertIn("No active blockchain found", str(ctx.exception))
+

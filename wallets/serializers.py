@@ -41,3 +41,23 @@ class SignTransactionSerializer(serializers.Serializer):
                 "Must be '0x' followed by 40 hexadecimal characters."
             )
         return addr.lower()
+
+
+class AccountBalanceSerializer(serializers.Serializer):
+    """
+    Representation serializer for account balance response in camelCase.
+    """
+
+    address = serializers.CharField(help_text="42-character account hex address.")
+    balance = serializers.IntegerField(help_text="Finalized spendable balance in base units.")
+    balanceFormatted = serializers.CharField(help_text="Finalized balance in formatted coin units.")
+    availableBalance = serializers.IntegerField(help_text="Available balance after active mempool deductions.")
+    availableBalanceFormatted = serializers.CharField(help_text="Available balance in formatted coin units.")
+    pendingTransactionsCount = serializers.IntegerField(help_text="Number of pending transactions in mempool.")
+    symbol = serializers.CharField(help_text="Native currency symbol (e.g. MYC).")
+    decimals = serializers.IntegerField(help_text="Smallest unit decimal precision (e.g. 8).")
+    nonce = serializers.IntegerField(help_text="Current sequential nonce.")
+    chainId = serializers.IntegerField(help_text="Blockchain network chain ID.")
+    networkName = serializers.CharField(help_text="Network display name.")
+    status = serializers.CharField(help_text="Account status (e.g. ACTIVE).")
+

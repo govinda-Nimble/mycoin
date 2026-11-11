@@ -3,6 +3,10 @@ Tests for Wallet creation, key generation, registration flow integration,
 and transaction signing API (using camelCase convention).
 """
 
+from datetime import timedelta
+from decimal import Decimal
+import hashlib
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
@@ -18,14 +22,20 @@ from accounts.infrastructure.jwt_adapter import DjangoJWTAdapter
 from accounts.infrastructure.otp_repository import DjangoOTPRepository
 from accounts.infrastructure.user_repository import DjangoUserRepository
 from accounts.infrastructure.wallet_adapter import DjangoWalletAdapter
-from network.models import Blockchain, BlockchainStatus
+from ledger.models import MempoolStatus, MempoolTransaction, Transaction, TransactionStatus
+from network.models import Blockchain, BlockchainStatus, Node
 from wallets.models import Account, Wallet, WalletStatus, WalletType
 from wallets.services.transaction_signer import (
     serialize_transaction_for_signing,
     sign_transaction_for_user,
     sign_transaction_payload,
 )
-from wallets.services.wallet_service import create_wallet_for_user, generate_keypair
+from wallets.services.wallet_service import (
+    create_wallet_for_user,
+    format_coin_amount,
+    generate_keypair,
+    get_account_balance,
+)
 
 User = get_user_model()
 
@@ -160,6 +170,86 @@ class RegistrationWalletIntegrationTests(TestCase):
         self.assertIn("walletData", result.data)
         self.assertEqual(result.data["walletData"]["address"], wallet.address)
         self.assertEqual(result.data["walletData"]["publicKey"], wallet.publicKey)
+
+    def test_registration_with_active_blockchain_creates_account_and_registration_bonus(self):
+        """Verify registration with active blockchain provisions Account, transfers 100 MYC bonus, and finalizes Block."""
+        from ledger.models import Block, Transaction, TransactionType
+        from network.services.genesis import GenesisConfig, TREASURY_ADDRESS, initialize_blockchain
+
+        # 1. Initialize active blockchain
+        genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        genesis_res = initialize_blockchain(genesis_config)
+        blockchain = genesis_res.blockchain
+
+        treasury = Account.objects.get(blockchain=blockchain, address=TREASURY_ADDRESS)
+        initial_treasury_balance = treasury.balance
+
+        email = "bob_bonus@example.com"
+        raw_otp = "222222"
+
+        self.otp_repo.upsert_registration_otp(
+            email=email,
+            otp=raw_otp,
+            expires_at=timezone.now() + timezone.timedelta(minutes=10),
+        )
+
+        result = self.use_case.execute(
+            first_name="Bob",
+            last_name="Bonus",
+            email=email,
+            otp=raw_otp,
+        )
+
+        self.assertTrue(result.success)
+        self.assertIn("accountData", result.data)
+        self.assertEqual(result.data["accountData"]["bonusAmount"], "100 MYC")
+
+        user = User.objects.get(email=email)
+        wallet = Wallet.objects.get(user=user)
+        account = Account.objects.get(wallet=wallet, blockchain=blockchain)
+
+        # 100 MYC in 8 decimals = 10,000,000,000 base units
+        expected_bonus_units = 100 * (10 ** blockchain.decimals)
+        self.assertEqual(account.balance, expected_bonus_units)
+        self.assertEqual(account.address, wallet.address)
+
+        # Verify Treasury debited
+        treasury.refresh_from_db()
+        self.assertEqual(treasury.balance, initial_treasury_balance - expected_bonus_units)
+
+        # Verify Registration Block created and finalized
+        blockchain.refresh_from_db()
+        tip_block = blockchain.latestFinalizedBlock
+        self.assertIsNotNone(tip_block)
+        self.assertEqual(tip_block.status, "FINALIZED")
+        self.assertEqual(account.creationBlock, tip_block)
+
+        # Verify Registration Bonus transaction
+        reg_tx = Transaction.objects.filter(
+            blockchain=blockchain,
+            receiver=account,
+            txType=TransactionType.REG_BONUS,
+        ).first()
+        self.assertIsNotNone(reg_tx)
+        self.assertEqual(reg_tx.amount, expected_bonus_units)
+        self.assertEqual(reg_tx.status, "FINALIZED")
+        self.assertEqual(reg_tx.block, tip_block)
+
+        # Verify Bob can now sign and validate a transfer of 20 MYC
+        signed_tx = sign_transaction_for_user(
+            user=user,
+            receiver_address="0x" + "9" * 40,
+            amount="2000000000",
+        )
+        self.assertEqual(signed_tx["senderAddress"], account.address)
+        self.assertEqual(signed_tx["nonce"], 0)
+
+        # Submit to Check Transaction API
+        client = APIClient()
+        check_res = client.post("/api/ledger/transactions/check/", signed_tx, format="json")
+        self.assertEqual(check_res.status_code, 201)
+        self.assertTrue(check_res.json()["success"])
+        self.assertEqual(check_res.json()["data"]["status"], "PENDING")
 
 
 class SignTransactionAPITests(TestCase):
@@ -306,3 +396,187 @@ class SignTransactionAPITests(TestCase):
         response = self.client.post(self.sign_url, payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["nonce"], 7)
+
+
+class CheckBalanceAPITests(TestCase):
+    """
+    Unit and integration tests for the Check User Balance API.
+    Verifies camelCase response keys, finalized vs available balance with mempool deductions,
+    address lookup, and authentication requirements.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+
+        # Seed blockchain
+        self.blockchain = Blockchain.objects.create(
+            name="MYCOIN DevNet",
+            symbol="MYC",
+            chainId=1001,
+            decimals=8,
+            baseTransferGas=21000,
+            minGasPrice=1,
+            status=BlockchainStatus.ACTIVE,
+        )
+
+        # Create user & active wallet
+        self.user = User.objects.create_user(
+            email="balance_user@example.com",
+            firstName="Bob",
+            lastName="Hodler",
+            userType="INDIVIDUAL",
+        )
+        self.wallet = create_wallet_for_user(self.user, name="Bob's Primary Wallet")
+
+        # Create on-chain Account with 100 MYC (10,000,000,000 units)
+        self.account = Account.objects.create(
+            blockchain=self.blockchain,
+            wallet=self.wallet,
+            address=self.wallet.address,
+            balance=10_000_000_000,
+            nonce=2,
+            status="ACTIVE",
+        )
+
+        # Authenticate user
+        refresh = RefreshToken.for_user(self.user)
+        self.access_token = str(refresh.access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.access_token}")
+
+        self.balance_url = reverse("wallet-balance")
+
+    def test_check_balance_authenticated_user_success(self):
+        """Test authenticated user retrieving their own balance without passing query params."""
+        response = self.client.get(self.balance_url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+
+        # Verify camelCase keys and correct values
+        self.assertEqual(data["address"], self.wallet.address)
+        self.assertEqual(data["balance"], 10_000_000_000)
+        self.assertEqual(data["balanceFormatted"], "100.00000000")
+        self.assertEqual(data["availableBalance"], 10_000_000_000)
+        self.assertEqual(data["availableBalanceFormatted"], "100.00000000")
+        self.assertEqual(data["pendingTransactionsCount"], 0)
+        self.assertEqual(data["symbol"], "MYC")
+        self.assertEqual(data["decimals"], 8)
+        self.assertEqual(data["nonce"], 2)
+        self.assertEqual(data["chainId"], 1001)
+        self.assertEqual(data["networkName"], "MYCOIN DevNet")
+        self.assertEqual(data["status"], "ACTIVE")
+
+    def test_check_balance_by_address_query_param(self):
+        """Test retrieving balance for a specific target address via query parameter."""
+        target_address = "0x0000000000000000000000000000000000000099"
+        Account.objects.create(
+            blockchain=self.blockchain,
+            address=target_address,
+            balance=5_000_000_000,
+            nonce=1,
+            status="ACTIVE",
+        )
+
+        response = self.client.get(f"{self.balance_url}?address={target_address}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["address"], target_address)
+        self.assertEqual(response.data["balance"], 5_000_000_000)
+        self.assertEqual(response.data["balanceFormatted"], "50.00000000")
+
+    def test_check_balance_by_path_param(self):
+        """Test retrieving balance for a specific target address via path parameter."""
+        target_address = "0x0000000000000000000000000000000000000088"
+        Account.objects.create(
+            blockchain=self.blockchain,
+            address=target_address,
+            balance=2_500_000_000,
+            nonce=0,
+            status="ACTIVE",
+        )
+
+        response = self.client.get(f"/api/wallets/balance/{target_address}/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["address"], target_address)
+        self.assertEqual(response.data["balance"], 2_500_000_000)
+        self.assertEqual(response.data["balanceFormatted"], "25.00000000")
+
+    def test_check_balance_unauthenticated_without_address_fails_401(self):
+        """Test unauthenticated request without address parameter returns 401 Unauthorized."""
+        self.client.credentials()  # Clear auth headers
+        response = self.client.get(self.balance_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn("Authentication credentials were not provided", response.data["reason"])
+
+    def test_check_balance_unauthenticated_with_address_succeeds_200(self):
+        """Test unauthenticated request with target address parameter succeeds (public blockchain query)."""
+        self.client.credentials()  # Clear auth headers
+        response = self.client.get(f"{self.balance_url}?address={self.wallet.address}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["address"], self.wallet.address)
+        self.assertEqual(response.data["balance"], 10_000_000_000)
+
+    def test_check_balance_invalid_address_format_fails_400(self):
+        """Test invalid address format returns 400 Bad Request."""
+        response = self.client.get(f"{self.balance_url}?address=not-a-valid-0x-address")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Must be '0x' followed by 40 hexadecimal characters", response.data["reason"])
+
+    def test_check_balance_unregistered_address_returns_zero(self):
+        """Test query for an address that has never transacted on-chain returns zero balance cleanly."""
+        unused_address = "0x1111111111111111111111111111111111111111"
+        response = self.client.get(f"{self.balance_url}?address={unused_address}")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["address"], unused_address)
+        self.assertEqual(response.data["balance"], 0)
+        self.assertEqual(response.data["balanceFormatted"], "0.00000000")
+        self.assertEqual(response.data["nonce"], 0)
+
+    def test_check_balance_with_pending_mempool_deduction(self):
+        """Test that active pending mempool transactions reduce availableBalance."""
+        node = Node.objects.create(
+            blockchain=self.blockchain,
+            nodeId="val-test-01",
+            endpoint="http://localhost:8001",
+        )
+
+        # Create pending transaction for 20 MYC (2,000,000,000) + gas fee (21000 * 2 = 42000)
+        tx_hash = hashlib.sha256(b"pending_tx_hash").hexdigest()
+        tx = Transaction.objects.create(
+            hash=tx_hash,
+            blockchain=self.blockchain,
+            sender=self.account,
+            receiverAddress="0x0000000000000000000000000000000000000002",
+            amount=2_000_000_000,
+            nonce=2,
+            gasLimit=21000,
+            gasPrice=2,
+            status=TransactionStatus.PENDING,
+            signature="a" * 128,
+            publicKey="04" + "b" * 126,
+        )
+        now = timezone.now()
+        MempoolTransaction.objects.create(
+            transaction=tx,
+            node=node,
+            priority=2,
+            arrivalTime=now,
+            expiresAt=now + timedelta(hours=1),
+            status=MempoolStatus.ACTIVE,
+        )
+
+        response = self.client.get(self.balance_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.data
+
+        # Finalized balance remains 100 MYC
+        self.assertEqual(data["balance"], 10_000_000_000)
+        self.assertEqual(data["balanceFormatted"], "100.00000000")
+
+        # Available balance accounts for 20 MYC + 42,000 gas fee deduction
+        expected_deduction = 2_000_000_000 + (21000 * 2)
+        expected_available = 10_000_000_000 - expected_deduction
+        self.assertEqual(data["availableBalance"], expected_available)
+        self.assertEqual(data["availableBalanceFormatted"], format_coin_amount(expected_available, 8))
+        self.assertEqual(data["pendingTransactionsCount"], 1)
+
