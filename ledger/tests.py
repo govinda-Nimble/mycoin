@@ -469,7 +469,7 @@ class MempoolProcessorTestCase(TestCase):
     def test_batch_size_respected(self):
         """7. Batch size limit and priority sorting (highest fee first) are respected."""
         for idx, prio in enumerate([5, 50, 20, 10]):
-            user = User.objects.create_user(email=f"sender_batch_{idx}@test.com", firstName=f"S{idx}", isEmailVerified=True)
+            user = User.objects.create_user(email=f"sender_batch_{idx}@test.com", firstName=f"S{idx}", lastName="Batch", isEmailVerified=True)
             w = create_wallet_for_user(user, name=f"Batch Wallet {idx}")
             acc = Account.objects.create(
                 blockchain=self.blockchain,

@@ -42,8 +42,8 @@ from ledger.models import (
 from network.models import Blockchain, BlockchainStatus, Node, NodeStatus, NodeType
 from network.services.genesis import VALIDATOR_RESERVE_ADDRESS
 from staking.models import Stake, StakeStatus, Validator, ValidatorStatus
-from wallets.models import Account, AccountStatus, AccountType, Wallet, WalletStatus
-from wallets.services.wallet_service import create_wallet_for_user
+from wallets.models import Account, AccountStatus, AccountType, Wallet, WalletStatus, WalletType
+from wallets.services.wallet_service import create_wallet_for_user, generate_keypair
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -146,9 +146,26 @@ def seed_validator_node(
             )
             logger.info("Created validator operator user '%s'", clean_email)
 
-        wallet = Wallet.objects.filter(user=operator, status=WalletStatus.ACTIVE).first()
-        if not wallet:
-            wallet = create_wallet_for_user(operator, name=f"Validator {node_id} Wallet")
+        wallet = Wallet.objects.filter(
+            user=operator,
+            status=WalletStatus.ACTIVE,
+            accounts__blockchain=blockchain,
+        ).first()
+        
+        if not wallet or Validator.objects.filter(publicKey=wallet.publicKey).exclude(account__blockchain=blockchain).exists():
+            while True:
+                private_key_hex, public_key_hex, address = generate_keypair()
+                if not Wallet.objects.filter(address=address).exists() and not Validator.objects.filter(publicKey=public_key_hex).exists():
+                    break
+            wallet = Wallet.objects.create(
+                user=operator,
+                name=f"Validator {node_id} Wallet",
+                walletType=WalletType.KEYSTORE,
+                address=address,
+                publicKey=public_key_hex,
+                keyReference=private_key_hex,
+                status=WalletStatus.ACTIVE,
+            )
             logger.info("Created active keystore wallet '%s' for validator operator", wallet.address)
 
         # 3. Locate Validator Reserve Account
@@ -179,13 +196,13 @@ def seed_validator_node(
                 )
 
             # Resolve parent block
+            blockchain.refresh_from_db()
             parent_block = blockchain.latestFinalizedBlock
             if not parent_block:
                 parent_block = Block.objects.filter(
                     blockchain=blockchain,
-                    height=0,
                     status=BlockStatus.FINALIZED,
-                ).first()
+                ).order_by("-height").first()
 
             if not parent_block:
                 raise NodeSeederError("Blockchain has no finalized genesis block.")

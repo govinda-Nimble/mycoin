@@ -168,9 +168,9 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
         address=receiver_address,
     ).first()
 
-    if not receiver_account:
+    if receiver_account and receiver_account.status != AccountStatus.ACTIVE:
         raise TransactionValidationError(
-            f"Receiver account '{receiver_address}' does not exist on active blockchain (Chain ID {blockchain.chainId}).",
+            f"Receiver account '{receiver_address}' is not active (current status: {receiver_account.status}).",
             step="CHECK_RECEIVER",
         )
 

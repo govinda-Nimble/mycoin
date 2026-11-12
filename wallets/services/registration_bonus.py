@@ -117,7 +117,20 @@ def create_account_and_grant_registration_bonus(
                 f"for {bonus_myc} MYC registration bonus ({bonus_units:,} units)."
             )
 
-        # 4. Resolve parent block and proposer validator
+        # 4. Look up an active validator for block proposal
+        proposer_validator = Validator.objects.filter(
+            account__blockchain=blockchain,
+            status="ACTIVE",
+        ).first()
+
+        if not proposer_validator:
+            from network.services.node_seeder import seed_validator_node
+            seed_res = seed_validator_node(node_id="myc-val-001", node_status="ONLINE")
+            proposer_validator = seed_res.validator
+            blockchain.refresh_from_db()
+            treasury_account.refresh_from_db()
+
+        # Resolve parent block and new height
         parent_block = blockchain.latestFinalizedBlock
         if not parent_block:
             parent_block = Block.objects.filter(
@@ -130,17 +143,6 @@ def create_account_and_grant_registration_bonus(
             raise ValueError(f"Blockchain '{blockchain.name}' has no finalized tip or genesis block.")
 
         new_height = parent_block.height + 1
-
-        # Look up an active validator for block proposal
-        proposer_validator = Validator.objects.filter(
-            account__blockchain=blockchain,
-            status="ACTIVE",
-        ).first()
-
-        if not proposer_validator:
-            from network.services.node_seeder import seed_validator_node
-            seed_res = seed_validator_node(node_id="myc-val-001", node_status="ONLINE")
-            proposer_validator = seed_res.validator
 
         # 5. Prepare deterministic hashes and roots
         now = timezone.now()

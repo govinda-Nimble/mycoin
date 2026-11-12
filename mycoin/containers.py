@@ -17,6 +17,10 @@ from accounts.infrastructure.jwt_adapter import DjangoJWTAdapter
 from accounts.infrastructure.otp_repository import DjangoOTPRepository
 from accounts.infrastructure.user_repository import DjangoUserRepository
 from accounts.infrastructure.wallet_adapter import DjangoWalletAdapter
+from ledger.container import LedgerContainer
+from network.container import NetworkContainer
+from staking.container import StakingContainer
+from wallets.container import WalletContainer
 
 
 class AuthContainer(containers.DeclarativeContainer):
@@ -84,4 +88,13 @@ class AuthContainer(containers.DeclarativeContainer):
     )
 
 
+class ApplicationContainer(containers.DeclarativeContainer):
+    auth = providers.Container(AuthContainer)
+    wallets = providers.Container(WalletContainer)
+    ledger = providers.Container(LedgerContainer)
+    network = providers.Container(NetworkContainer)
+    staking = providers.Container(StakingContainer)
+
+
 container = AuthContainer()
+app_container = ApplicationContainer()

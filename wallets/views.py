@@ -4,10 +4,13 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from dependency_injector.wiring import Provide, inject
+
 from common.utils import get_single_error
-from wallets.serializers import ADDRESS_REGEX, AccountBalanceSerializer, SignTransactionSerializer
-from wallets.services.transaction_signer import sign_transaction_for_user
-from wallets.services.wallet_service import get_account_balance
+from wallets.application.check_balance import CheckBalanceUseCase
+from wallets.application.sign_transaction import SignTransactionUseCase
+from wallets.container import WalletContainer
+from wallets.serializers import ADDRESS_REGEX, SignTransactionSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -22,31 +25,33 @@ class SignTransactionAPIView(APIView):
     permission_classes = [IsAuthenticated]
     serializer_class = SignTransactionSerializer
 
-    def post(self, request):
+    @inject
+    def post(
+        self,
+        request,
+        use_case: SignTransactionUseCase = Provide[WalletContainer.sign_transaction_use_case],
+    ):
         serializer = self.serializer_class(data=request.data)
         if not serializer.is_valid():
+            err_msg = get_single_error(serializer.errors)
             return Response(
-                {"reason": get_single_error(serializer.errors)},
+                {"reason": err_msg, "error": err_msg},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            signed_tx = sign_transaction_for_user(
-                user=request.user,
-                receiver_address=serializer.validated_data["receiverAddress"],
-                amount=serializer.validated_data["amount"],
-            )
-            return Response(signed_tx, status=status.HTTP_200_OK)
-        except ValueError as err:
+        result = use_case.execute(
+            user=request.user,
+            receiver_address=serializer.validated_data["receiverAddress"],
+            amount=serializer.validated_data["amount"],
+        )
+
+        if not result.success:
             return Response(
-                {"reason": str(err)},
-                status=status.HTTP_400_BAD_REQUEST,
+                {"reason": result.reason, "error": result.reason},
+                status=result.status_code,
             )
-        except Exception as err:
-            return Response(
-                {"reason": f"Failed to sign transaction: {err}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+
+        return Response(result.data, status=result.status_code)
 
 
 class CheckBalanceAPIView(APIView):
@@ -59,23 +64,19 @@ class CheckBalanceAPIView(APIView):
       - Optional chainId parameter: GET /api/wallets/balance/?chainId=1001
 
     Returns a standardized camelCase response containing:
-      - address
-      - balance (smallest units)
-      - balanceFormatted (decimal string)
-      - availableBalance (after pending mempool deductions)
-      - availableBalanceFormatted
-      - pendingTransactionsCount
-      - symbol
-      - decimals
-      - nonce
-      - chainId
-      - networkName
-      - status
+      - address, balance, balanceFormatted, availableBalance, availableBalanceFormatted,
+        pendingTransactionsCount, symbol, decimals, nonce, chainId, networkName, status
     """
 
     permission_classes = [AllowAny]
 
-    def get(self, request, address=None):
+    @inject
+    def get(
+        self,
+        request,
+        address=None,
+        use_case: CheckBalanceUseCase = Provide[WalletContainer.check_balance_use_case],
+    ):
         target_address = address or request.query_params.get("address")
         chain_id_param = request.query_params.get("chainId")
 
@@ -103,22 +104,16 @@ class CheckBalanceAPIView(APIView):
                     status=status.HTTP_401_UNAUTHORIZED,
                 )
 
-        try:
-            balance_data = get_account_balance(
-                user=request.user if (request.user and request.user.is_authenticated) else None,
-                address=target_address,
-                chain_id=chain_id,
-            )
-            return Response(balance_data, status=status.HTTP_200_OK)
-        except ValueError as err:
+        result = use_case.execute(
+            user=request.user if (request.user and request.user.is_authenticated) else None,
+            address=target_address,
+            chain_id=chain_id,
+        )
+
+        if not result.success:
             return Response(
-                {"reason": str(err)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception as err:
-            logger.exception("Failed to retrieve balance: %s", err)
-            return Response(
-                {"reason": f"Failed to retrieve balance: {err}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {"reason": result.reason},
+                status=result.status_code,
             )
 
+        return Response(result.data, status=result.status_code)

@@ -27,7 +27,7 @@ logger = logging.getLogger("ledger.mempool_processor")
 
 # Default processor configuration
 DEFAULT_BATCH_SIZE: int = 5
-DEFAULT_INTERVAL_SECONDS: int = 30
+DEFAULT_INTERVAL_SECONDS: int = 60
 
 # PostgreSQL advisory lock ID for mempool processor coordination (arbitrary unique 64-bit int)
 MEMPOOL_PROCESSOR_LOCK_KEY: int = 1001001

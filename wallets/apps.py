@@ -2,4 +2,13 @@ from django.apps import AppConfig
 
 
 class WalletsConfig(AppConfig):
-    name = 'wallets'
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "wallets"
+
+    def ready(self):
+        try:
+            from wallets.container import WalletContainer
+            container = WalletContainer()
+            container.wire(modules=["wallets.views"])
+        except Exception:
+            pass

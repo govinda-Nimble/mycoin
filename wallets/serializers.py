@@ -38,7 +38,7 @@ class SignTransactionSerializer(serializers.Serializer):
         addr = str(value).strip()
         if not ADDRESS_REGEX.match(addr):
             raise serializers.ValidationError(
-                "Must be '0x' followed by 40 hexadecimal characters."
+                "receiverAddress: Must be '0x' followed by 40 hexadecimal characters."
             )
         return addr.lower()
 

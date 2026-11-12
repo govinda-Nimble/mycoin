@@ -5,6 +5,9 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/auth/", include("accounts.urls")),
     path("api/wallets/", include("wallets.urls")),
+    path("api/ledger/", include("ledger.urls")),
     path("api/transactions/", include("ledger.urls")),
+    path("api/network/", include("network.urls")),
+    path("api/staking/", include("staking.urls")),
     path("api/", include("ledger.urls")),
 ]

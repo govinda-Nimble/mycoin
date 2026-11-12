@@ -24,6 +24,7 @@ from unittest.mock import patch
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
+from rest_framework.test import APIClient
 
 from common.models import GENESIS_PREVIOUS_HASH, ImmutableRecordError
 from ledger.models import (
@@ -378,6 +379,7 @@ class NodeSeederTestCase(TestCase):
         self.assertIsNotNone(result.funding_block)
         self.assertEqual(result.funding_block.height, 1)
         self.assertEqual(result.funding_block.status, "FINALIZED")
+        self.blockchain.refresh_from_db()
         self.assertEqual(self.blockchain.latestFinalizedBlock, result.funding_block)
 
         self.assertIsNotNone(result.funding_transaction)
@@ -476,3 +478,27 @@ class NodeSeederTestCase(TestCase):
             )
         self.assertIn("No active blockchain found", str(ctx.exception))
 
+
+
+class NetworkAPITests(TestCase):
+    """API tests for the DDD layered Network endpoints."""
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_res = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_res.blockchain
+
+    def test_get_network_status_success(self):
+        response = self.client.get("/api/network/status/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertEqual(response.json()["data"]["chainId"], 1001)
+        self.assertEqual(response.json()["data"]["chainName"], "TEST_CHAIN")
+
+    def test_list_nodes_success(self):
+        response = self.client.get("/api/network/nodes/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertIsInstance(response.json()["data"], list)

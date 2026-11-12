@@ -235,10 +235,21 @@ class RegistrationWalletIntegrationTests(TestCase):
         self.assertEqual(reg_tx.status, "FINALIZED")
         self.assertEqual(reg_tx.block, tip_block)
 
+        # Create receiver on-chain account for transfer validation
+        receiver_addr = "0x" + "9" * 40
+        Account.objects.create(
+            blockchain=blockchain,
+            address=receiver_addr,
+            accountType="EOA",
+            balance=0,
+            nonce=0,
+            status="ACTIVE",
+        )
+
         # Verify Bob can now sign and validate a transfer of 20 MYC
         signed_tx = sign_transaction_for_user(
             user=user,
-            receiver_address="0x" + "9" * 40,
+            receiver_address=receiver_addr,
             amount="2000000000",
         )
         self.assertEqual(signed_tx["senderAddress"], account.address)
@@ -325,7 +336,7 @@ class SignTransactionAPITests(TestCase):
         verified = vk.verify(
             sig_raw,
             digest,
-            hashfunc=ecdsa.util.hashlib.sha256,
+            hashfunc=hashlib.sha256,
             sigdecode=ecdsa.util.sigdecode_string,
         )
         self.assertTrue(verified)

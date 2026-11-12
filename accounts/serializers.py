@@ -93,18 +93,33 @@ class LoginSerializer(serializers.Serializer):
 
 
 class LogoutSerializer(serializers.Serializer):
-    """Validates logout payload."""
+    """Validates logout payload. Supports both 'refresh' and 'refreshToken' (camelCase)."""
 
     refresh = serializers.CharField(
-        required=True,
-        error_messages={"required": "Refresh token is required to log out."}
+        required=False,
     )
+
+    def validate(self, attrs):
+        token = attrs.get("refresh")
+        if not token or not str(token).strip():
+            raise serializers.ValidationError("Refresh token is required to log out.")
+        attrs["refresh"] = str(token).strip()
+        return attrs
 
 
 class RefreshTokenSerializer(serializers.Serializer):
-    """Validates refresh token payload."""
+    """Validates refresh token payload. Supports both 'refresh' and 'refreshToken' (camelCase)."""
 
     refresh = serializers.CharField(
-        required=True,
-        error_messages={"required": "Refresh token is required."}
+        required=False,
     )
+    refreshToken = serializers.CharField(
+        required=False,
+    )
+
+    def validate(self, attrs):
+        token = attrs.get("refresh") or attrs.get("refreshToken")
+        if not token or not str(token).strip():
+            raise serializers.ValidationError("Refresh token is required.")
+        attrs["refresh"] = str(token).strip()
+        return attrs

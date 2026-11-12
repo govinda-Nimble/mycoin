@@ -4,16 +4,17 @@ API Views for transaction ingestion, validation, and mempool queueing.
 
 import logging
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from dependency_injector.wiring import Provide, inject
+
 from common.utils import get_single_error
+from ledger.application.get_transaction import GetTransactionUseCase
+from ledger.application.validate_transaction import ValidateTransactionUseCase
+from ledger.container import LedgerContainer
 from ledger.serializers import CheckTransactionSerializer
-from ledger.services.transaction_validator import (
-    TransactionValidationError,
-    validate_and_enqueue_transaction,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,15 @@ class CheckTransactionAPIView(APIView):
     - Returns standardized camelCase transaction metadata
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     serializer_class = CheckTransactionSerializer
 
-    def post(self, request):
+    @inject
+    def post(
+        self,
+        request,
+        use_case: ValidateTransactionUseCase = Provide[LedgerContainer.validate_transaction_use_case],
+    ):
         serializer = self.serializer_class(data=request.data)
         if not serializer.is_valid():
             return Response(
@@ -51,49 +57,49 @@ class CheckTransactionAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            result = validate_and_enqueue_transaction(serializer.validated_data)
-            tx = result.transaction
-            mempool = result.mempool_entry
+        result = use_case.execute(payload=serializer.validated_data)
 
+        if not result.success:
+            err_body = {
+                "success": False,
+                "reason": result.reason,
+            }
+            if result.step:
+                err_body["step"] = result.step
+            return Response(err_body, status=result.status_code)
+
+        return Response(
+            {
+                "success": True,
+                "message": result.reason,
+                "data": result.data,
+            },
+            status=result.status_code,
+        )
+
+
+class TransactionDetailAPIView(APIView):
+    """
+    Presentation layer: Retrieves details for a specific transaction by hash.
+    """
+
+    permission_classes = [AllowAny]
+
+    @inject
+    def get(
+        self,
+        request,
+        tx_hash: str,
+        use_case: GetTransactionUseCase = Provide[LedgerContainer.get_transaction_use_case],
+    ):
+        result = use_case.execute(tx_hash=tx_hash)
+        if not result.success:
             return Response(
-                {
-                    "success": True,
-                    "message": result.message,
-                    "data": {
-                        "txHash": result.tx_hash,
-                        "senderAddress": tx.sender.address,
-                        "receiverAddress": tx.receiverAddress,
-                        "amount": str(tx.amount),
-                        "nonce": tx.nonce,
-                        "gasLimit": tx.gasLimit,
-                        "gasPrice": str(tx.gasPrice),
-                        "fee": tx.gasLimit * tx.gasPrice,
-                        "status": tx.status,
-                        "mempoolStatus": mempool.status,
-                        "mempoolEntryId": str(mempool.id),
-                        "nodeId": mempool.node.nodeId,
-                        "arrivalTime": mempool.arrivalTime.isoformat(),
-                        "expiresAt": mempool.expiresAt.isoformat(),
-                    },
-                },
-                status=status.HTTP_201_CREATED,
+                {"success": False, "reason": result.reason},
+                status=result.status_code,
             )
-        except TransactionValidationError as err:
-            return Response(
-                {
-                    "success": False,
-                    "reason": err.message,
-                    "step": err.step,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except Exception as err:
-            logger.exception("Unexpected error in CheckTransactionAPIView: %s", err)
-            return Response(
-                {
-                    "success": False,
-                    "reason": f"Internal transaction processing error: {str(err)}",
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+
+        return Response(
+            {"success": True, "data": result.data},
+            status=result.status_code,
+        )

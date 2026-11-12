@@ -23,6 +23,7 @@ from common.utils import get_client_ip, get_single_error
 from mycoin.containers import AuthContainer
 
 
+
 class RegisterAPIView(APIView):
     """
     Presentation layer: Initiates user registration and issues registration OTP.
@@ -55,6 +56,7 @@ class RegisterAPIView(APIView):
         if result.data:
             response_body["data"] = result.data
         return Response(response_body, status=result.status_code)
+
 
 
 class ConfirmRegisterOtpAPIView(APIView):
@@ -93,6 +95,7 @@ class ConfirmRegisterOtpAPIView(APIView):
         return Response(response_body, status=result.status_code)
 
 
+
 class RequestLoginOtpAPIView(APIView):
     """
     Presentation layer: Initiates login by sending an OTP to the user's registered email.
@@ -124,9 +127,6 @@ class RequestLoginOtpAPIView(APIView):
             response_body["data"] = result.data
         return Response(response_body, status=result.status_code)
 
-
-# Alias for backward compatibility
-LoginAPIView = RequestLoginOtpAPIView
 
 
 class VerifyLoginOtpAPIView(APIView):
@@ -161,9 +161,6 @@ class VerifyLoginOtpAPIView(APIView):
             response_body["data"] = result.data
         return Response(response_body, status=result.status_code)
 
-
-# Alias for naming consistency
-LoginOtpVerificationAPIView = VerifyLoginOtpAPIView
 
 
 class LogoutAPIView(APIView):
@@ -200,6 +197,7 @@ class LogoutAPIView(APIView):
         return Response(response_body, status=result.status_code)
 
 
+
 class RefreshTokenAPIView(APIView):
     """
     Presentation layer: Generates a new access token from an active refresh token.
@@ -221,7 +219,6 @@ class RefreshTokenAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        print("55555555555555")
         result = use_case.execute(
             refresh_token=serializer.validated_data["refresh"],
             client_ip=get_client_ip(request),

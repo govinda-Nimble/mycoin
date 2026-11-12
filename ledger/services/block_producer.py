@@ -91,9 +91,9 @@ def produce_block_from_mempool(
         return None
 
     # 1. Resolve parent block (latest finalized block on this chain)
+    blockchain.refresh_from_db()
     parent_block = (
-        blockchain.latestFinalizedBlock
-        or Block.objects.filter(blockchain=blockchain, status=BlockStatus.FINALIZED).order_by("-height").first()
+        Block.objects.filter(blockchain=blockchain, status=BlockStatus.FINALIZED).order_by("-height").first()
         or Block.objects.filter(blockchain=blockchain).order_by("-height").first()
     )
     if not parent_block:

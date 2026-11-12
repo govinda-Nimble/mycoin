@@ -1,8 +1,15 @@
-from typing import Any
 from datetime import datetime, timezone as dt_timezone
+import logging
+from typing import Any, Dict
+
 from django.conf import settings
-from rest_framework_simplejwt.tokens import RefreshToken, OutstandingToken
-from accounts.domain import UseCaseResult
+from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import OutstandingToken, RefreshToken
+
+logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 class DjangoJWTAdapter:
@@ -10,13 +17,14 @@ class DjangoJWTAdapter:
     Implements TokenManager protocol via rest_framework_simplejwt.
     """
 
-    def create_token_pair_for_user(self, user: Any) -> dict[str, Any]:
+    def create_token_pair_for_user(self, user: Any) -> Dict[str, Any]:
         user_id = str(user.id)
         try:
-            OutstandingToken.objects.filter(user_id=user_id).delete()
-        except Exception as e:
-            logger.warning("Failed to clear previous outstanding tokens for user %s: %s", user_id, exc)
-        
+            # Clear previous non-blacklisted outstanding tokens to prevent token accumulation
+            OutstandingToken.objects.filter(user_id=user_id, blacklistedtoken__isnull=True).delete()
+        except Exception as exc:
+            logger.debug("Failed to clear previous non-blacklisted outstanding tokens for user %s: %s", user_id, exc)
+
         refresh = RefreshToken.for_user(user)
         access = refresh.access_token
 
@@ -28,69 +36,54 @@ class DjangoJWTAdapter:
             refresh["exp"],
             tz=dt_timezone.utc
         )
-
         return {
             "tokenType": "Bearer",
-            "accessToken": str(refresh.access_token),
+            "accessToken": str(access),
             "refreshToken": str(refresh),
-            'accessTokenExpiresAt': access_expires_at,
-            'refreshTokenExpiresAt': refresh_expires_at,
+            "accessTokenExpiresAt": access_expires_at,
+            "refreshTokenExpiresAt": refresh_expires_at,
         }
 
-    def refresh_access_token(self, refresh_token: str) -> dict[str, Any]:
+    def refresh_access_token(self, refresh_token: str) -> Dict[str, Any]:
+        """
+        Validates the refresh token and generates a fresh token pair.
+        Raises TokenError if the token is invalid, expired, blacklisted, or if user is inactive.
+        """
         try:
             token = RefreshToken(refresh_token)
-            user_id = token.get('user_id')
-            jti = token.get('jti')
-            if not user_id:
-                return UseCaseResult(
-                        success=False,
-                        reason="Invalid refresh token.",
-                        status_code=400,
-                    )
-            # if not OutstandingToken.objects.filter(
-            #     jti=jti,
-            #     user_id=user_id,
-            #     expires_at__gt=timezone.now(),
-            # ).exists():
-            #     return UseCaseResult(
-            #         success=False,
-            #         reason="Invalid or expired refresh token.",
-            #         status_code=401,
-            #     )
+        except (TokenError, InvalidToken) as exc:
+            logger.warning("Invalid or expired refresh token: %s", exc)
+            raise TokenError("The refresh token is invalid or expired.") from exc
+
+        user_id = token.get("user_id") or token.get(api_settings.USER_ID_CLAIM)
+        if not user_id:
+            logger.warning("Refresh token contains no user identification claim.")
+            raise TokenError("The refresh token is invalid or expired.")
+
+        try:
             user = User.objects.get(id=user_id)
-            if not user.is_active:
-                return UseCaseResult(
-                    success=False,
-                    reason="User account is not active.",
-                    status_code=403,
-                )
-            return self.create_token_pair_for_user(user=user)
-            
         except User.DoesNotExist:
-            return UseCaseResult(
-                success=False,
-                reason="Invalid refresh token.",
-                status_code=400,
-            )
-        except TokenError as exc:
-            logger.exception(str(exc))
-            return UseCaseResult(
-                success=False,
-                reason="Invalid or expired refresh token.",
-                status_code=401,
-            )
-        except Exception as exc:
-            logger.exception(str(exc))
-            return UseCaseResult(
-                success=False,
-                reason=f"An unexpected error occurred during refresh token: {str(exc)}",
-                status_code=500,
-            )
+            logger.warning("User %s associated with refresh token does not exist.", user_id)
+            raise TokenError("The refresh token is invalid or expired.")
+
+        if not user.is_active:
+            logger.warning("User %s associated with refresh token is not active.", user_id)
+            raise TokenError("User account is not active.")
+
+        # Invalidate the used refresh token so it cannot be replayed
+        self.blacklist_token(refresh_token)
+
+        # Issue fresh token pair for the user
+        return self.create_token_pair_for_user(user=user)
 
     def blacklist_token(self, refresh_token: str) -> bool:
-        token = RefreshToken(refresh_token)
-        if hasattr(token, "blacklist"):
-            token.blacklist()
-        return True
+        try:
+            token = RefreshToken(refresh_token)
+            if hasattr(token, "blacklist"):
+                token.blacklist()
+            return True
+        except Exception as exc:
+            logger.debug("Token blacklist skipped or already blacklisted: %s", exc)
+            return False
+
 

@@ -1,5 +1,9 @@
+import logging
 from typing import Optional
+
 from accounts.domain import ActivityRecorder, TokenManager, UseCaseResult
+
+logger = logging.getLogger(__name__)
 
 
 class RefreshTokenUseCase:
@@ -23,7 +27,8 @@ class RefreshTokenUseCase:
     ) -> UseCaseResult:
         try:
             token_data = self._tokens.refresh_access_token(refresh_token)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Token renewal failed: %s", exc)
             return UseCaseResult(
                 success=False,
                 reason="The refresh token is invalid or expired.",
