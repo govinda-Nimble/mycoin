@@ -12,7 +12,9 @@ from wallets.services.transaction_signer import (
 )
 from wallets.services.wallet_service import (
     create_wallet_for_user,
+    format_coin_amount,
     generate_keypair,
+    parse_coin_amount,
 )
 
 __all__ = [
@@ -23,5 +25,7 @@ __all__ = [
     "sign_transaction_for_user",
     "sign_transaction_payload",
     "create_wallet_for_user",
+    "format_coin_amount",
     "generate_keypair",
+    "parse_coin_amount",
 ]

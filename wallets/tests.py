@@ -390,6 +390,57 @@ class SignTransactionAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("greater than zero", response.data["error"])
 
+    def test_sign_transaction_decimal_myc_half(self):
+        """Test sending 0.5 MYC multiplies by 10^8 to become 50,000,000 base units."""
+        payload = {
+            "amount": "0.5",
+            "receiverAddress": self.receiver_address,
+        }
+        response = self.client.post(self.sign_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["amount"], "50000000")
+
+    def test_sign_transaction_decimal_myc_small_fraction(self):
+        """Test sending 0.0005 MYC multiplies by 10^8 to become 50,000 base units."""
+        payload = {
+            "amount": "0.0005",
+            "receiverAddress": self.receiver_address,
+        }
+        response = self.client.post(self.sign_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["amount"], "50000")
+
+    def test_sign_transaction_decimal_myc_minimum(self):
+        """Test sending minimum allowed 0.00000001 MYC becomes 1 base unit."""
+        payload = {
+            "amount": "0.00000001",
+            "receiverAddress": self.receiver_address,
+        }
+        response = self.client.post(self.sign_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["amount"], "1")
+
+    def test_sign_transaction_decimal_myc_with_unit(self):
+        """Test sending 50 with unit='MYC' multiplies by 10^8 to become 5,000,000,000 base units."""
+        payload = {
+            "amount": "50",
+            "unit": "MYC",
+            "receiverAddress": self.receiver_address,
+        }
+        response = self.client.post(self.sign_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["amount"], "5000000000")
+
+    def test_sign_transaction_below_minimum_fails(self):
+        """Test sending amount smaller than 0.00000001 MYC is rejected with 400 Bad Request."""
+        payload = {
+            "amount": "0.000000001",
+            "receiverAddress": self.receiver_address,
+        }
+        response = self.client.post(self.sign_url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("0.00000001", response.data["error"])
+
     def test_sign_transaction_uses_onchain_account_nonce(self):
         """Test that if on-chain Account exists, its nonce is automatically picked up."""
         Account.objects.create(

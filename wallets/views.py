@@ -12,7 +12,9 @@ from wallets.application.sign_transaction import SignTransactionUseCase
 from wallets.container import WalletContainer
 from wallets.serializers import ADDRESS_REGEX, SignTransactionSerializer
 
+
 logger = logging.getLogger(__name__)
+
 
 
 class SignTransactionAPIView(APIView):

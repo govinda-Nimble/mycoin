@@ -6,10 +6,10 @@ For the centralized prototype, private keys are securely retained in `keyReferen
 so the backend can sign future on-chain transactions without a frontend key-manager.
 """
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 from django.db import transaction
 from django.utils import timezone
@@ -91,6 +91,63 @@ def format_coin_amount(amount: int, decimals: int = 8) -> str:
     """Formats an integer amount in smallest units into a human-readable decimal string."""
     dec_val = Decimal(amount) / (Decimal(10) ** decimals)
     return f"{dec_val:.{decimals}f}"
+
+
+def parse_coin_amount(
+    amount_input: Union[str, int, float, Decimal],
+    decimals: int = 8,
+    is_coin_unit: Optional[bool] = None,
+) -> int:
+    """
+    Parses a coin amount (e.g. '50', '0.5', '0.0005', '0.00000001') or raw base units integer
+    into blockchain base units (smallest units).
+
+    Args:
+        amount_input: String, int, or Decimal representing the amount.
+        decimals: Precision decimals (default: 8).
+        is_coin_unit: If True, treats numbers as whole coins (multiplies by 10^decimals).
+                      If None (auto-detect), treats numbers with a decimal point (e.g. '0.5')
+                      as whole coin units, and pure integer strings as base units.
+
+    Returns:
+        int: Amount in smallest base units.
+    """
+    raw_str = str(amount_input).strip()
+    if raw_str.upper().endswith("MYC"):
+        raw_str = raw_str[:-3].strip()
+        is_coin_unit = True
+
+    try:
+        val = Decimal(raw_str)
+    except (InvalidOperation, TypeError):
+        raise ValueError("Amount must be a valid number.")
+
+    if val <= 0:
+        raise ValueError("Amount must be greater than zero.")
+
+    multiplier = Decimal(10 ** decimals)
+    min_amount_coin = Decimal("1") / multiplier
+    min_amount_str = f"{min_amount_coin:.{decimals}f}"
+
+    if is_coin_unit is None:
+        is_coin_unit = "." in raw_str
+
+    if is_coin_unit:
+        if val < min_amount_coin:
+            raise ValueError(f"Minimum transfer amount is {min_amount_str} MYC (maximum {decimals} decimal places).")
+
+        exponent = val.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -decimals:
+            raise ValueError(f"Amount cannot have more than {decimals} decimal places.")
+
+        base_units = val * multiplier
+        if base_units % 1 != 0:
+            raise ValueError(f"Amount exceeds maximum precision of {decimals} decimals.")
+        return int(base_units)
+    else:
+        if val % 1 != 0:
+            raise ValueError("Amount in base units must be an integer.")
+        return int(val)
 
 
 def get_account_balance(
