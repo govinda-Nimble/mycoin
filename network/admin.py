@@ -1,23 +1,5 @@
 from django.contrib import admin
-from network.models import Blockchain, Node, NodePeer
-
-
-@admin.register(Blockchain)
-class BlockchainAdmin(admin.ModelAdmin):
-    list_display = (
-        "name",
-        "symbol",
-        "chainId",
-        "decimals",
-        "status",
-        "blockTimeSeconds",
-        "blockReward",
-        "latestFinalizedBlock",
-    )
-    search_fields = ("name", "symbol", "chainId")
-    list_filter = ("status", "decimals")
-    readonly_fields = ("id", "createdAt", "updatedAt")
-    ordering = ("chainId",)
+from network.models import Node, NodePeer
 
 
 @admin.register(Node)

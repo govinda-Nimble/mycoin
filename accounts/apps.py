@@ -7,7 +7,7 @@ class AccountsConfig(AppConfig):
 
     def ready(self):
         try:
-            from mycoin.containers import container
+            from config.containers import container
             container.wire(modules=["accounts.views"])
         except ImportError:
             pass

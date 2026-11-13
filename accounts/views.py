@@ -20,7 +20,7 @@ from accounts.serializers import (
     RequestLoginOtpSerializer,
 )
 from common.utils import get_client_ip, get_single_error
-from mycoin.containers import AuthContainer
+from config.containers import AuthContainer
 
 
 

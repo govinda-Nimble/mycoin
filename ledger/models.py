@@ -85,7 +85,7 @@ class Block(BaseModel):
 
     Status = BlockStatus
 
-    blockchain = models.ForeignKey("network.Blockchain", on_delete=models.PROTECT, related_name="blocks")
+    blockchain = models.ForeignKey("chain.Blockchain", on_delete=models.PROTECT, related_name="blocks")
     height = models.PositiveBigIntegerField(help_text="Sequential height. Genesis = 0.")
     blockHash = models.CharField(
         max_length=64,
@@ -201,11 +201,11 @@ class Transaction(BaseModel):
         help_text="Hash of the canonical, signed transaction payload.",
         error_messages={"unique": "A transaction with this hash already exists."},
     )
-    blockchain = models.ForeignKey("network.Blockchain", on_delete=models.PROTECT, related_name="transactions")
-    sender = models.ForeignKey("wallets.Account", on_delete=models.PROTECT, related_name="sent_transactions")
+    blockchain = models.ForeignKey("chain.Blockchain", on_delete=models.PROTECT, related_name="transactions")
+    sender = models.ForeignKey("chain.Account", on_delete=models.PROTECT, related_name="sent_transactions")
     receiverAddress = models.CharField(max_length=42, validators=[address_validator])
     receiver = models.ForeignKey(
-        "wallets.Account",
+        "chain.Account",
         null=True,
         blank=True,
         on_delete=models.PROTECT,

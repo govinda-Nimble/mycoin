@@ -8,6 +8,7 @@ urlpatterns = [
     path("api/ledger/", include("ledger.urls")),
     path("api/transactions/", include("ledger.urls")),
     path("api/network/", include("network.urls")),
+    path("api/chain/", include("chain.urls")),
     path("api/staking/", include("staking.urls")),
     path("api/", include("ledger.urls")),
 ]

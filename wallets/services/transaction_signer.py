@@ -12,9 +12,6 @@ from typing import Any, Dict, Tuple
 
 import ecdsa
 
-from network.models import Blockchain, BlockchainStatus
-from wallets.models import Account, Wallet, WalletStatus
-
 logger = logging.getLogger(__name__)
 
 
@@ -88,65 +85,14 @@ def sign_transaction_for_user(
     amount: str,
 ) -> Dict[str, Any]:
     """
-    Signs a transfer transaction on behalf of an authenticated user using their stored wallet.
-    User supplies only `amount` and `receiver_address`; all other parameters (gasLimit, gasPrice,
-    nonce, chainId) are resolved automatically by the backend.
-
-    Returns:
-        Dict[str, Any]: Formatted signed transaction payload with camelCase variables.
+    Convenience wrapper for non-API callers, tests, and seeders.
+    Delegates to the infrastructure layer Secp256k1TransactionSignerAdapter.
     """
-    # 1. Fetch user's active wallet
-    wallet = Wallet.objects.filter(user=user, status=WalletStatus.ACTIVE).first()
-    if not wallet:
-        raise ValueError("User does not have an active wallet.")
+    from wallets.infrastructure.transaction_signer_adapter import Secp256k1TransactionSignerAdapter
 
-    if not wallet.keyReference:
-        raise ValueError("User wallet does not have a private key stored for signing.")
-
-    # 2. Fetch active blockchain network configuration
-    blockchain = Blockchain.objects.filter(status=BlockchainStatus.ACTIVE).first()
-    if not blockchain:
-        raise ValueError("No active blockchain configured.")
-
-    # 3. Backend automatically resolves gasLimit, gasPrice, and chainId
-    chain_id = blockchain.chainId
-    gas_limit = blockchain.baseTransferGas
-    gas_price = str(max(blockchain.minGasPrice, 2))
-
-    # 4. Backend automatically resolves sender sequential nonce
-    account = Account.objects.filter(wallet=wallet, blockchain=blockchain).first()
-    nonce = account.nonce if account else 0
-
-    # 5. Sign the payload using wallet's private key
-    signing_key = wallet.get_signing_key()
-    signature_hex, _ = sign_transaction_payload(
-        signing_key=signing_key,
-        chain_id=chain_id,
-        sender_address=wallet.address,
+    adapter = Secp256k1TransactionSignerAdapter()
+    return adapter.sign_transaction(
+        user=user,
         receiver_address=receiver_address,
         amount=amount,
-        nonce=nonce,
-        gas_limit=gas_limit,
-        gas_price=gas_price,
     )
-
-    logger.info(
-        "User %s signed transaction: %s -> %s (amount: %s, nonce: %d)",
-        user.email,
-        wallet.address,
-        receiver_address,
-        amount,
-        nonce,
-    )
-
-    # 6. Format output with camelCase keys ready for node broadcast
-    return {
-        "senderAddress": wallet.address,
-        "receiverAddress": receiver_address,
-        "amount": str(amount),
-        "nonce": nonce,
-        "gasLimit": gas_limit,
-        "gasPrice": str(gas_price),
-        "publicKey": wallet.publicKey,
-        "signature": signature_hex,
-    }

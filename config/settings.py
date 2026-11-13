@@ -34,10 +34,13 @@ INSTALLED_APPS = [
     # Local apps
     'common',
     'accounts',
-    'network',
     'wallets',
+    'chain',
+    'network',
     'ledger',
     'staking',
+
+    "migraid",
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
@@ -56,7 +59,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'mycoin.urls'
+ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
     {
@@ -73,7 +76,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = 'mycoin.wsgi.application'
+WSGI_APPLICATION = 'config.wsgi.application'
 
 
 DATABASES = {

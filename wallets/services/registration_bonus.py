@@ -27,10 +27,10 @@ from ledger.models import (
     TransactionStatus,
     TransactionType,
 )
-from network.models import Blockchain, BlockchainStatus
+from network.models import Account, AccountStatus, AccountType, Blockchain, BlockchainStatus
 from network.services.genesis import TREASURY_ADDRESS
 from staking.models import Validator
-from wallets.models import Account, AccountStatus, AccountType, Wallet
+from wallets.models import Wallet
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ def create_account_and_grant_registration_bonus(
             return None
 
         # 2. Check if user already has an Account on this blockchain
-        existing_account = Account.objects.filter(blockchain=blockchain, wallet=wallet).first()
+        existing_account = Account.objects.filter(blockchain=blockchain, address=wallet.address).first()
         if existing_account:
             logger.info("User %s already has on-chain account %s.", user.email, existing_account.address)
             # Find the transaction that granted the bonus if exists
@@ -187,7 +187,6 @@ def create_account_and_grant_registration_bonus(
         # 7. Create User Account linked to this Block
         user_account = Account(
             blockchain=blockchain,
-            wallet=wallet,
             address=wallet.address,
             accountType=AccountType.EOA,
             balance=bonus_units,

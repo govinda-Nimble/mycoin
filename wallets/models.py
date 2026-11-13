@@ -1,7 +1,4 @@
-"""Wallet (key container, off-chain) and Account (on-chain state) models.
-
-No private key is ever stored here. ``Wallet.key_reference`` is only an opaque pointer to an
-external key-management component, designed in a later phase.
+"""Wallet (key container, off-chain)
 """
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -9,6 +6,8 @@ from django.db.models import Q
 from django.conf import settings
 
 from common.models import BaseModel, address_validator, amount_field, check, hex_validator
+# Re-export for backward compatibility
+# from network.models import Account, AccountType, SystemAccountType, AccountStatus  # noqa: E402, F401
 
 
 class WalletType(models.TextChoices):
@@ -20,23 +19,6 @@ class WalletStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active"
     DISABLED = "DISABLED", "Disabled"
     ARCHIVED = "ARCHIVED", "Archived"
-
-
-class AccountType(models.TextChoices):
-    EOA = "EOA", "Externally owned account"
-    CONTRACT = "CONTRACT", "Contract account"
-
-
-class SystemAccountType(models.TextChoices):
-    TREASURY = "TREASURY", "Treasury"
-    VALIDATOR_RESERVE = "VALIDATOR_RESERVE", "Validator Reserve"
-    DEVELOPMENT_RESERVE = "DEVELOPMENT_RESERVE", "Development Reserve"
-
-    
-class AccountStatus(models.TextChoices):
-    ACTIVE = "ACTIVE", "Active"
-    FROZEN = "FROZEN", "Frozen"
-    CLOSED = "CLOSED", "Closed"
 
 
 class Wallet(BaseModel):
@@ -92,87 +74,5 @@ class Wallet(BaseModel):
         return self.name or self.address
 
 
-
-class Account(BaseModel):
-    """On-chain account state. Balance and nonce change ONLY when a block is finalized."""
-
-    Type = AccountType
-    Status = AccountStatus
-
-    blockchain = models.ForeignKey("network.Blockchain", on_delete=models.PROTECT, related_name="accounts")
-    systemAccountType = models.CharField(
-        max_length=30,
-        choices=SystemAccountType.choices,
-        null=True,
-        blank=True,
-        help_text="Identifies the purpose of a system account."
-    )
-    wallet = models.ForeignKey(
-        Wallet,
-        null=True,
-        blank=True,
-        on_delete=models.PROTECT,
-        related_name="accounts",
-        help_text="Managing wallet. Null for contract/system accounts.",
-    )
-    derivationIndex = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="Reserved for HD wallets. Null means the account address equals the wallet address.",
-    )
-    address = models.CharField(
-        max_length=42,
-        validators=[address_validator],
-        error_messages={"unique": "This address already exists on this blockchain."},
-    )
-    accountType = models.CharField(max_length=16, choices=AccountType.choices, default=AccountType.EOA)
-    balance = amount_field("Finalized spendable balance in smallest units.", default=0)
-    nonce = models.BigIntegerField(
-        default=0,
-        help_text="Next expected finalized transaction nonce (sequential, starts at 0).",
-    )
-    status = models.CharField(max_length=16, choices=AccountStatus.choices, default=AccountStatus.ACTIVE)
-    creationBlock = models.ForeignKey(
-        "ledger.Block",
-        null=True,
-        blank=True,
-        on_delete=models.PROTECT,
-        related_name="created_accounts",
-        help_text="Block that created the account. Null only for genesis accounts.",
-    )
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["blockchain", "address"], name="chain_account_unique_address"),
-            models.UniqueConstraint(
-                fields=["blockchain", "wallet"],
-                condition=Q(wallet__isnull=False, derivationIndex__isnull=True),
-                name="chain_account_one_per_wallet_per_chain",
-            ),
-            models.UniqueConstraint(
-                fields=["blockchain", "wallet", "derivationIndex"],
-                condition=Q(derivationIndex__isnull=False),
-                name="chain_account_unique_derivation",
-            ),
-            check(Q(balance__gte=0), "chain_account_balance_non_negative"),
-            check(Q(nonce__gte=0), "chain_account_nonce_non_negative"),
-            check(
-                Q(accountType="EOA") | Q(wallet__isnull=True),
-                "chain_account_contract_has_no_wallet",
-            ),
-            check(
-                Q(derivationIndex__isnull=True) | Q(wallet__isnull=False),
-                "chain_account_derivation_needs_wallet",
-            ),
-        ]
-        indexes = [models.Index(fields=["blockchain", "status"])]
-
-    def __str__(self):
-        return self.address
-
-    def clean(self):
-        super().clean()
-        if self.wallet_id and self.derivationIndex is None and self.address != self.wallet.address:
-            raise ValidationError(
-                {"address": "Without a derivation index the account address must equal the wallet address."}
-            )
+# Re-export for backward compatibility
+from chain.models import Account, AccountType, SystemAccountType, AccountStatus  # noqa: E402, F401

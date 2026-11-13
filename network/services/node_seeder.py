@@ -39,10 +39,20 @@ from ledger.models import (
     TransactionStatus,
     TransactionType,
 )
-from network.models import Blockchain, BlockchainStatus, Node, NodeStatus, NodeType
+from network.models import (
+    Account,
+    AccountStatus,
+    AccountType,
+    Blockchain,
+    BlockchainStatus,
+    Node,
+    NodeStatus,
+    NodeType,
+)
 from network.services.genesis import VALIDATOR_RESERVE_ADDRESS
 from staking.models import Stake, StakeStatus, Validator, ValidatorStatus
-from wallets.models import Account, AccountStatus, AccountType, Wallet, WalletStatus, WalletType
+
+from wallets.models import Wallet, WalletStatus, WalletType
 from wallets.services.wallet_service import create_wallet_for_user, generate_keypair
 
 logger = logging.getLogger(__name__)
@@ -149,7 +159,7 @@ def seed_validator_node(
         wallet = Wallet.objects.filter(
             user=operator,
             status=WalletStatus.ACTIVE,
-            accounts__blockchain=blockchain,
+            address__in=Account.objects.filter(blockchain=blockchain).values_list("address", flat=True),
         ).first()
         
         if not wallet or Validator.objects.filter(publicKey=wallet.publicKey).exclude(account__blockchain=blockchain).exists():
@@ -185,7 +195,7 @@ def seed_validator_node(
         funding_block: Optional[Block] = None
 
         # 4. Check if Account already exists and is sufficiently funded
-        account = Account.objects.select_for_update().filter(blockchain=blockchain, wallet=wallet).first()
+        account = Account.objects.select_for_update().filter(blockchain=blockchain, address=wallet.address).first()
 
         if not account:
             # Verify reserve account has enough balance to fund this validator
@@ -212,7 +222,6 @@ def seed_validator_node(
             # Create Account record with 0 balance first
             account = Account.objects.create(
                 blockchain=blockchain,
-                wallet=wallet,
                 address=wallet.address,
                 accountType=AccountType.EOA,
                 balance=0,

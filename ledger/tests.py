@@ -24,10 +24,10 @@ from ledger.services.mempool_processor import (
     process_mempool,
     try_acquire_advisory_lock,
 )
-from network.models import Blockchain, BlockchainStatus
+from network.models import Account, AccountStatus, AccountType, Blockchain, BlockchainStatus
 from network.services.genesis import GenesisConfig, initialize_blockchain
 from network.services.node_seeder import seed_validator_node
-from wallets.models import Account, AccountStatus, AccountType, Wallet, WalletStatus
+from wallets.models import Wallet, WalletStatus
 from wallets.services.transaction_signer import sign_transaction_payload
 from wallets.services.wallet_service import create_wallet_for_user
 
@@ -63,7 +63,6 @@ class CheckTransactionTestCase(TestCase):
         self.alice_wallet = create_wallet_for_user(self.alice_user, name="Alice Wallet")
         self.alice_account = Account.objects.create(
             blockchain=self.blockchain,
-            wallet=self.alice_wallet,
             address=self.alice_wallet.address,
             accountType=AccountType.EOA,
             balance=100_000_000_000,  # 1,000 MYC in 8-decimal base units
@@ -286,7 +285,6 @@ class MempoolProcessorTestCase(TestCase):
         self.alice_wallet = create_wallet_for_user(self.alice_user, name="Alice Mempool Wallet")
         self.alice_account = Account.objects.create(
             blockchain=self.blockchain,
-            wallet=self.alice_wallet,
             address=self.alice_wallet.address,
             accountType=AccountType.EOA,
             balance=100_000_000_000,
@@ -440,7 +438,6 @@ class MempoolProcessorTestCase(TestCase):
 
         other_account = Account.objects.create(
             blockchain=other_chain,
-            wallet=self.alice_wallet,
             address=self.alice_wallet.address,
             accountType=AccountType.EOA,
             balance=100_000_000,
@@ -473,7 +470,6 @@ class MempoolProcessorTestCase(TestCase):
             w = create_wallet_for_user(user, name=f"Batch Wallet {idx}")
             acc = Account.objects.create(
                 blockchain=self.blockchain,
-                wallet=w,
                 address=w.address,
                 balance=100_000_000_000,
                 nonce=0,

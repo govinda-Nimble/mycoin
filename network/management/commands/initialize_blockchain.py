@@ -12,7 +12,7 @@ from network.services.genesis import (
     GenesisInitializationError,
     initialize_blockchain,
 )
-from wallets.models import SystemAccountType
+from network.models import SystemAccountType
 
 
 class Command(BaseCommand):

@@ -25,6 +25,8 @@ class InitializeGenesisUseCase:
                 chain_name=chain_name,
                 symbol=symbol,
             )
+            treasury_acc = res.treasury_account
+            treasury_bal = str(treasury_acc.balance) if treasury_acc else "0"
             return UseCaseResult(
                 success=True,
                 reason=f"Genesis blockchain '{chain_name}' initialized successfully.",
@@ -33,7 +35,7 @@ class InitializeGenesisUseCase:
                     "chainId": res.blockchain.chainId,
                     "chainName": res.blockchain.name,
                     "genesisBlockHash": res.genesis_block.blockHash,
-                    "treasuryBalance": str(res.treasury_account.balance),
+                    "treasuryBalance": treasury_bal,
                 },
             )
         except Exception as err:

@@ -52,7 +52,7 @@ class Validator(BaseModel):
 
     Status = ValidatorStatus
 
-    account = models.OneToOneField("wallets.Account", on_delete=models.PROTECT, related_name="validator")
+    account = models.OneToOneField("chain.Account", on_delete=models.PROTECT, related_name="validator")
     publicKey = models.CharField(
         max_length=130,
         unique=True,
@@ -112,7 +112,7 @@ class Stake(BaseModel):
     Status = StakeStatus
 
     validator = models.ForeignKey(Validator, on_delete=models.PROTECT, related_name="stakes")
-    stakerAccount = models.ForeignKey("wallets.Account", on_delete=models.PROTECT, related_name="stakes")
+    stakerAccount = models.ForeignKey("chain.Account", on_delete=models.PROTECT, related_name="stakes")
     amount = amount_field("Staked amount in smallest units. Must be > 0.")
     status = models.CharField(max_length=16, choices=StakeStatus.choices, default=StakeStatus.ACTIVE)
     stakedAtHeight = models.PositiveBigIntegerField(help_text="Finalized height at which the stake started.")

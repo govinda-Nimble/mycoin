@@ -23,8 +23,8 @@ from accounts.infrastructure.otp_repository import DjangoOTPRepository
 from accounts.infrastructure.user_repository import DjangoUserRepository
 from accounts.infrastructure.wallet_adapter import DjangoWalletAdapter
 from ledger.models import MempoolStatus, MempoolTransaction, Transaction, TransactionStatus
-from network.models import Blockchain, BlockchainStatus, Node
-from wallets.models import Account, Wallet, WalletStatus, WalletType
+from network.models import Account, Blockchain, BlockchainStatus, Node
+from wallets.models import Wallet, WalletStatus, WalletType
 from wallets.services.transaction_signer import (
     serialize_transaction_for_signing,
     sign_transaction_for_user,
@@ -164,7 +164,7 @@ class RegistrationWalletIntegrationTests(TestCase):
         self.assertEqual(wallet.privateKey, wallet.keyReference)
 
         # Verify NO Account model was created yet (deferred to first MYC transfer)
-        self.assertEqual(Account.objects.filter(wallet=wallet).count(), 0)
+        self.assertEqual(Account.objects.filter(address=wallet.address).count(), 0)
 
         # Verify walletData is included in the use case result
         self.assertIn("walletData", result.data)
@@ -206,7 +206,7 @@ class RegistrationWalletIntegrationTests(TestCase):
 
         user = User.objects.get(email=email)
         wallet = Wallet.objects.get(user=user)
-        account = Account.objects.get(wallet=wallet, blockchain=blockchain)
+        account = Account.objects.get(address=wallet.address, blockchain=blockchain)
 
         # 100 MYC in 8 decimals = 10,000,000,000 base units
         expected_bonus_units = 100 * (10 ** blockchain.decimals)
@@ -445,7 +445,6 @@ class SignTransactionAPITests(TestCase):
         """Test that if on-chain Account exists, its nonce is automatically picked up."""
         Account.objects.create(
             blockchain=self.blockchain,
-            wallet=self.wallet,
             address=self.wallet.address,
             balance=10_000_000_000,
             nonce=7,
@@ -494,7 +493,6 @@ class CheckBalanceAPITests(TestCase):
         # Create on-chain Account with 100 MYC (10,000,000,000 units)
         self.account = Account.objects.create(
             blockchain=self.blockchain,
-            wallet=self.wallet,
             address=self.wallet.address,
             balance=10_000_000_000,
             nonce=2,

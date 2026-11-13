@@ -32,9 +32,8 @@ from ledger.models import (
     TransactionReceipt,
     TransactionStatus,
 )
-from network.models import Blockchain
+from network.models import Account, AccountStatus, AccountType, Blockchain
 from staking.models import Validator, ValidatorStatus
-from wallets.models import Account, AccountStatus, AccountType, Wallet
 
 logger = logging.getLogger("ledger.block_producer")
 
@@ -176,12 +175,10 @@ def produce_block_from_mempool(
             sender.save(update_fields=["balance", "nonce", "updatedAt"])
 
             # Credit receiver account (create if needed)
-            receiver_wallet = Wallet.objects.filter(address=tx.receiverAddress).first()
             receiver_acc, _ = Account.objects.get_or_create(
                 blockchain=blockchain,
                 address=tx.receiverAddress,
                 defaults={
-                    "wallet": receiver_wallet,
                     "accountType": AccountType.EOA,
                     "balance": 0,
                     "nonce": 0,

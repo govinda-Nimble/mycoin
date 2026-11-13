@@ -31,8 +31,7 @@ from ledger.models import (
     TransactionStatus,
     TransactionType,
 )
-from network.models import Blockchain, BlockchainStatus, Node
-from wallets.models import Account, AccountStatus
+from network.models import Account, AccountStatus, Blockchain, BlockchainStatus, Node
 
 logger = logging.getLogger(__name__)
 
