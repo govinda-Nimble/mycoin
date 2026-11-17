@@ -120,7 +120,22 @@ def process_mempool(
                 message="Processor lock is currently held by another worker.",
             )
 
-        # 3. Query total count of eligible active mempool transactions
+        # 3. Clean up expired active mempool transactions and mark un-blocked transactions as DROPPED
+        expired_mempool_entries = MempoolTransaction.objects.filter(
+            status=MempoolStatus.ACTIVE,
+            expiresAt__lte=now,
+        )
+        if expired_mempool_entries.exists():
+            expired_tx_ids = list(expired_mempool_entries.values_list("transaction_id", flat=True))
+            expired_mempool_entries.update(status=MempoolStatus.EXPIRED)
+            Transaction.objects.filter(
+                id__in=expired_tx_ids,
+                status=TransactionStatus.PENDING,
+                block__isnull=True,
+            ).update(status=TransactionStatus.DROPPED)
+            logger.info("Evicted %d expired transaction(s) from mempool.", len(expired_tx_ids))
+
+        # 4. Query total count of eligible active mempool transactions
         eligible_base_qs = MempoolTransaction.objects.filter(
             status=MempoolStatus.ACTIVE,
             expiresAt__gt=now,
@@ -131,7 +146,7 @@ def process_mempool(
 
         total_eligible_count = eligible_base_qs.count()
 
-        # 4. Handle empty mempool
+        # 5. Handle empty mempool
         if total_eligible_count == 0:
             duration = round(time.perf_counter() - start_time, 4)
             logger.debug(

@@ -10,8 +10,10 @@ class DjangoLedgerRepository(LedgerReader):
 
     def find_transaction_by_hash(self, tx_hash: str) -> Optional[Transaction]:
         clean_hash = tx_hash.strip().lower()
-        if not clean_hash.startswith("0x"):
-            clean_hash = f"0x{clean_hash}"
+        # if not clean_hash.startswith("0x"):
+        #     clean_hash = f"0x{clean_hash}"
+        if clean_hash.startswith("0x"):
+            clean_hash = clean_hash.lstrip("0x")
         return (
             Transaction.objects.filter(hash=clean_hash)
             .select_related("sender", "receiver", "block")

@@ -255,6 +255,22 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
     # -------------------------------------------------------------
     # 5. Check Nonce
     # -------------------------------------------------------------
+    now = timezone.now()
+    # Evict expired active mempool transactions for this sender before nonce validation
+    expired_mtxs = MempoolTransaction.objects.filter(
+        transaction__sender=sender_account,
+        status=MempoolStatus.ACTIVE,
+        expiresAt__lte=now,
+    )
+    if expired_mtxs.exists():
+        expired_tx_ids = list(expired_mtxs.values_list("transaction_id", flat=True))
+        expired_mtxs.update(status=MempoolStatus.EXPIRED)
+        Transaction.objects.filter(
+            id__in=expired_tx_ids,
+            status=TransactionStatus.PENDING,
+            block__isnull=True,
+        ).update(status=TransactionStatus.DROPPED)
+
     if nonce_int < sender_account.nonce:
         raise TransactionValidationError(
             f"Nonce too low: sender account finalized nonce is {sender_account.nonce}, but received {nonce_int}.",

@@ -51,7 +51,7 @@ NO_BLOCK_STATUSES = ["CREATED", "SIGNED", "VALIDATED", "PENDING", "REJECTED", "D
 # Statuses in which a transaction may still be unsigned.
 UNSIGNED_ALLOWED_STATUSES = ["CREATED", "REJECTED", "DROPPED"]
 # Statuses that do not occupy a (sender, nonce) slot.
-NONCE_FREE_STATUSES = ["REJECTED", "DROPPED"]
+NONCE_FREE_STATUSES = ["REJECTED", "DROPPED", "FAILED"]
 
 
 class ReceiptStatus(models.TextChoices):

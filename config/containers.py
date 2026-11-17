@@ -12,11 +12,13 @@ from accounts.application.register_account import RegisterAccountUseCase
 from accounts.application.request_login_otp import RequestLoginOtpUseCase
 from accounts.application.user_login import UserLoginUseCase
 from accounts.application.user_logout import UserLogoutUseCase
+
 from accounts.infrastructure.activity import DjangoActivityRecorder
 from accounts.infrastructure.jwt_adapter import DjangoJWTAdapter
 from accounts.infrastructure.otp_repository import DjangoOTPRepository
 from accounts.infrastructure.user_repository import DjangoUserRepository
 from accounts.infrastructure.wallet_adapter import DjangoWalletAdapter
+
 from ledger.container import LedgerContainer
 from network.container import NetworkContainer
 from staking.container import StakingContainer

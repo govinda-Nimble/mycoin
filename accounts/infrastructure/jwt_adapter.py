@@ -70,20 +70,43 @@ class DjangoJWTAdapter:
             logger.warning("User %s associated with refresh token is not active.", user_id)
             raise TokenError("User account is not active.")
 
-        # Invalidate the used refresh token so it cannot be replayed
-        self.blacklist_token(refresh_token)
-
         # Issue fresh token pair for the user
         return self.create_token_pair_for_user(user=user)
 
-    def blacklist_token(self, refresh_token: str) -> bool:
+
+    def blacklist_token(self, refresh_token: str, user_id: str) -> bool:
+        """
+        Revokes a refresh token by removing it from the OutstandingToken table.
+        Blacklisted tokens are not stored in the database; instead, the token is cleared.
+        """
         try:
             token = RefreshToken(refresh_token)
-            if hasattr(token, "blacklist"):
-                token.blacklist()
+        except (TokenError, InvalidToken) as exc:
+            logger.warning("Invalid or expired refresh token: %s", exc)
+            raise TokenError("The refresh token is invalid or expired.") from exc
+
+        try:
+            if str(user_id) != str(token.get("user_id")):
+                logger.warning("User %s associated with refresh token does not exist.", user_id)
+                raise TokenError("The refresh token is invalid or expired.")
+
+            jti = token.get(api_settings.JTI_CLAIM) or token.get("jti")
+            deleted = 0
+            if jti:
+                deleted, _ = OutstandingToken.objects.filter(jti=jti).delete()
+
+            if not deleted:
+                deleted, _ = OutstandingToken.objects.filter(token=refresh_token).delete()
+
+            if not deleted:
+                logger.warning("Token with jti %s not found in outstanding tokens or already revoked.", jti)
+                raise TokenError("The refresh token is invalid or has already been revoked.")
+
             return True
+        except TokenError:
+            raise
         except Exception as exc:
-            logger.debug("Token blacklist skipped or already blacklisted: %s", exc)
-            return False
+            logger.error("Failed to remove token from table: %s", exc)
+            raise TokenError("Failed to revoke token.") from exc
 
 

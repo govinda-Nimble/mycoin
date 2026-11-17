@@ -1,5 +1,5 @@
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -168,7 +168,7 @@ class LogoutAPIView(APIView):
     Presentation layer: Revokes active refresh token.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     serializer_class = LogoutSerializer
 
     @inject
@@ -183,10 +183,9 @@ class LogoutAPIView(APIView):
                 {"success": False, "reason": get_single_error(serializer.errors)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
         user_id = str(request.user.id) if request.user and request.user.is_authenticated else None
         result = use_case.execute(
-            refresh_token=serializer.validated_data["refresh"],
+            refresh_token=serializer.validated_data["refreshToken"],
             user_id=user_id,
             client_ip=get_client_ip(request),
         )
@@ -220,7 +219,7 @@ class RefreshTokenAPIView(APIView):
             )
 
         result = use_case.execute(
-            refresh_token=serializer.validated_data["refresh"],
+            refresh_token=serializer.validated_data["refreshToken"],
             client_ip=get_client_ip(request),
         )
 

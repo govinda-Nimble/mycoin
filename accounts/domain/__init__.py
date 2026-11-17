@@ -52,7 +52,7 @@ class TokenManager(Protocol):
     def refresh_access_token(self, refresh_token: str) -> dict[str, Any]:
         ...
 
-    def blacklist_token(self, refresh_token: str) -> bool:
+    def blacklist_token(self, refresh_token: str, user_id: str) -> bool:
         ...
 
 

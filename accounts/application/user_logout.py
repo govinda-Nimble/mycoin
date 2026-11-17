@@ -23,7 +23,7 @@ class UserLogoutUseCase:
         client_ip: Optional[str] = None,
     ) -> UseCaseResult:
         try:
-            self._tokens.blacklist_token(refresh_token)
+            self._tokens.blacklist_token(refresh_token, user_id)
         except Exception:
             return UseCaseResult(
                 success=False,
@@ -35,7 +35,7 @@ class UserLogoutUseCase:
 
         return UseCaseResult(
             success=True,
-            reason="Logged out successfully.",
+            reason="User logged out successfully.",
             status_code=200,
         )
 

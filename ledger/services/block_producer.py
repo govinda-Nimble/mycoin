@@ -262,6 +262,12 @@ def produce_block_from_mempool(
                 if sender.balance < total_cost
                 else f"Nonce mismatch (expected {sender.nonce}, got {tx.nonce})"
             )
+
+            # Advance sender nonce so that a transaction mined into a block as FAILED
+            # consumes its nonce slot and does not permanently break or fail subsequent sequential transactions.
+            sender.nonce = max(sender.nonce, tx.nonce + 1)
+            sender.save(update_fields=["nonce", "updatedAt"])
+
             TransactionReceipt.objects.create(
                 transaction=tx,
                 block=block,
