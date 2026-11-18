@@ -20,11 +20,11 @@ CORS_ALLOW_ALL_ORIGINS = True # "CORS_ORIGIN_ALLOW_ALL"  this is old syntax for
 CORS_ALLOW_HEADERS = [
     *default_headers
 ]
-CSRF_TRUSTED_ORIGINS = [
-   '*'
-]
+# CSRF_TRUSTED_ORIGINS = [
+#    "http://localhost:4200",
+# ]
 
-# Application definition
+
 
 INSTALLED_APPS = [
     'django.contrib.admin',

@@ -16,6 +16,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from ledger.management.commands.run_mempool_processor import Command as MempoolProcessorCommand
 from ledger.models import (
@@ -1611,6 +1612,221 @@ class TransactionDetailAPITests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertFalse(response.data["success"])
+
+
+class UserTransactionsAPITests(TestCase):
+    """Test suite for UserTransactionsAPIView (/api/ledger/transactions/ and /api/wallets/transactions/)."""
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_res = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_res.blockchain
+
+        self.seed_res = seed_validator_node(
+            node_id="val-user-tx-001",
+            endpoint="http://localhost:8001",
+            stake_amount_myc=1000,
+            node_status="ONLINE",
+        )
+        self.node = self.seed_res.node
+
+        # User A
+        self.user_a = get_user_model().objects.create_user(
+            email="user_a@test.com",
+            firstName="Alice",
+            lastName="User",
+        )
+        self.wallet_a = create_wallet_for_user(self.user_a)
+        self.account_a = Account.objects.create(
+            blockchain=self.blockchain,
+            address=self.wallet_a.address,
+            accountType=AccountType.EOA,
+            balance=10_000_000_000,
+            nonce=0,
+            status=AccountStatus.ACTIVE,
+        )
+        self.token_a = str(RefreshToken.for_user(self.user_a).access_token)
+
+        # User B
+        self.user_b = get_user_model().objects.create_user(
+            email="user_b@test.com",
+            firstName="Bob",
+            lastName="User",
+        )
+        self.wallet_b = create_wallet_for_user(self.user_b)
+        self.account_b = Account.objects.create(
+            blockchain=self.blockchain,
+            address=self.wallet_b.address,
+            accountType=AccountType.EOA,
+            balance=10_000_000_000,
+            nonce=0,
+            status=AccountStatus.ACTIVE,
+        )
+        self.token_b = str(RefreshToken.for_user(self.user_b).access_token)
+
+    def test_unauthenticated_request_returns_401(self):
+        url = "/api/ledger/transactions/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_user_with_no_transactions_returns_empty_list(self):
+        new_user = get_user_model().objects.create_user(email="empty@test.com", firstName="No", lastName="Tx")
+        token = str(RefreshToken.for_user(new_user).access_token)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+
+        response = self.client.get("/api/ledger/transactions/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["data"]["transactionsData"], [])
+        self.assertEqual(response.data["data"]["paginationData"]["count"], 0)
+
+    def test_returns_sent_and_received_transactions_with_direction(self):
+        # Tx1: User A -> User B
+        tx1 = Transaction.objects.create(
+            hash=hashlib.sha256(b"tx_a_to_b").hexdigest(),
+            blockchain=self.blockchain,
+            sender=self.account_a,
+            receiverAddress=self.wallet_b.address,
+            receiver=self.account_b,
+            amount=500_000_000,
+            nonce=0,
+            gasLimit=21000,
+            gasPrice=1,
+            publicKey=self.wallet_a.publicKey,
+            signature="0x" + "11" * 64,
+            status=TransactionStatus.PENDING,
+        )
+
+        # Tx2: User B -> User A
+        tx2 = Transaction.objects.create(
+            hash=hashlib.sha256(b"tx_b_to_a").hexdigest(),
+            blockchain=self.blockchain,
+            sender=self.account_b,
+            receiverAddress=self.wallet_a.address,
+            receiver=self.account_a,
+            amount=200_000_000,
+            nonce=0,
+            gasLimit=21000,
+            gasPrice=1,
+            publicKey=self.wallet_b.publicKey,
+            signature="0x" + "22" * 64,
+            status=TransactionStatus.PENDING,
+        )
+
+        # Request as User A
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token_a}")
+        response = self.client.get("/api/ledger/transactions/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+
+        data = response.data["data"]
+        txs = data["transactionsData"]
+        self.assertEqual(len(txs), 2)
+        self.assertEqual(data["paginationData"]["count"], 2)
+
+        tx_hashes = [t["txHash"] for t in txs]
+        self.assertIn(tx1.hash, tx_hashes)
+        self.assertIn(tx2.hash, tx_hashes)
+
+        # Check directions for User A
+        direction_map = {t["txHash"]: t["direction"] for t in txs}
+        self.assertEqual(direction_map[tx1.hash], "OUTGOING")
+        self.assertEqual(direction_map[tx2.hash], "INCOMING")
+
+    def test_pagination_page_and_pagesize(self):
+        # Create 15 transactions for User A
+        for i in range(15):
+            Transaction.objects.create(
+                hash=hashlib.sha256(f"pagination_tx_{i}".encode()).hexdigest(),
+                blockchain=self.blockchain,
+                sender=self.account_a,
+                receiverAddress=self.wallet_b.address,
+                receiver=self.account_b,
+                amount=1_000_000 + i,
+                nonce=i,
+                gasLimit=21000,
+                gasPrice=1,
+                publicKey=self.wallet_a.publicKey,
+                signature="0x" + "33" * 64,
+                status=TransactionStatus.PENDING,
+            )
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token_a}")
+
+        # Page 1 with pageSize=5
+        res_page1 = self.client.get("/api/ledger/transactions/?page=1&pageSize=5")
+        self.assertEqual(res_page1.status_code, status.HTTP_200_OK)
+        data_p1 = res_page1.data["data"]
+        self.assertEqual(len(data_p1["transactionsData"]), 5)
+        self.assertEqual(data_p1["paginationData"]["count"], 15)
+        self.assertEqual(data_p1["paginationData"]["totalPages"], 3)
+        self.assertEqual(data_p1["paginationData"]["currentPage"], 1)
+        self.assertEqual(data_p1["paginationData"]["pageSize"], 5)
+        self.assertIsNotNone(data_p1["paginationData"]["next"])
+
+        # Page 2
+        res_page2 = self.client.get("/api/ledger/transactions/?page=2&pageSize=5")
+        self.assertEqual(res_page2.status_code, status.HTTP_200_OK)
+        data_p2 = res_page2.data["data"]
+        self.assertEqual(len(data_p2["transactionsData"]), 5)
+        self.assertEqual(data_p2["paginationData"]["currentPage"], 2)
+
+    def test_filter_by_direction(self):
+        # Tx outgoing
+        Transaction.objects.create(
+            hash=hashlib.sha256(b"dir_out").hexdigest(),
+            blockchain=self.blockchain,
+            sender=self.account_a,
+            receiverAddress=self.wallet_b.address,
+            amount=100,
+            nonce=0,
+            gasLimit=21000,
+            gasPrice=1,
+            publicKey=self.wallet_a.publicKey,
+            signature="0x" + "44" * 64,
+            status=TransactionStatus.PENDING,
+        )
+        # Tx incoming
+        Transaction.objects.create(
+            hash=hashlib.sha256(b"dir_in").hexdigest(),
+            blockchain=self.blockchain,
+            sender=self.account_b,
+            receiverAddress=self.wallet_a.address,
+            amount=200,
+            nonce=0,
+            gasLimit=21000,
+            gasPrice=1,
+            publicKey=self.wallet_b.publicKey,
+            signature="0x" + "55" * 64,
+            status=TransactionStatus.PENDING,
+        )
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token_a}")
+
+        # Filter sent
+        res_sent = self.client.get("/api/ledger/transactions/?direction=sent")
+        self.assertEqual(res_sent.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_sent.data["data"]["transactionsData"]), 1)
+        self.assertEqual(res_sent.data["data"]["transactionsData"][0]["direction"], "OUTGOING")
+
+        # Filter received
+        res_rec = self.client.get("/api/ledger/transactions/?direction=received")
+        self.assertEqual(res_rec.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_rec.data["data"]["transactionsData"]), 1)
+        self.assertEqual(res_rec.data["data"]["transactionsData"][0]["direction"], "INCOMING")
+
+    def test_accessible_via_wallet_and_alias_routes(self):
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {self.token_a}")
+        res_wallet = self.client.get("/api/wallets/transactions/")
+        self.assertEqual(res_wallet.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_wallet.data["success"])
+
+        res_alias = self.client.get("/api/transactions/")
+        self.assertEqual(res_alias.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_alias.data["success"])
+
 
 
 

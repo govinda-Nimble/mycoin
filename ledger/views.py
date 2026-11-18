@@ -3,9 +3,10 @@ API Views for transaction ingestion, validation, and mempool queueing.
 """
 
 import logging
+from django.db.models import Q
 from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -16,7 +17,8 @@ from ledger.application.get_transaction import GetTransactionUseCase
 from ledger.application.validate_transaction import ValidateTransactionUseCase
 from ledger.container import LedgerContainer
 from ledger.models import Block, BlockTransaction, Transaction
-from ledger.serializers import BlockSerializer, CheckTransactionSerializer
+from ledger.serializers import BlockSerializer, CheckTransactionSerializer, UserTransactionSerializer
+from wallets.models import Wallet
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,124 @@ class DataPagination(PageNumberPagination):
             "next": self.get_next_link(),
             "previous": self.get_previous_link(),
         }
+
+
+class UserTransactionsAPIView(APIView):
+    """
+    Presentation layer: Returns the paginated transaction history for the authenticated user
+    (both sent and received transactions) across their registered wallet addresses.
+    Requires Bearer JWT authentication (access_token).
+
+    Supported query parameters:
+      - page: page number (default 1)
+      - pageSize: number of transactions per page (default 10, max 100)
+      - chainId: filter transactions by blockchain chain ID
+      - status: filter transactions by status (e.g. PENDING, FINALIZED, FAILED)
+      - direction: filter by direction ('sent'/'outgoing' or 'received'/'incoming')
+    """
+
+    permission_classes = [IsAuthenticated]
+    pagination_class = DataPagination
+
+    def get(self, request):
+        user = request.user
+
+        # 1. Resolve all wallet addresses belonging to this user
+        user_addresses = set(
+            addr.lower()
+            for addr in Wallet.objects.filter(user=user).values_list("address", flat=True)
+            if addr
+        )
+
+        if not user_addresses:
+            # User has no wallets registered yet
+            return Response(
+                {
+                    "success": True,
+                    "data": {
+                        "transactionsData": [],
+                        "paginationData": {
+                            "count": 0,
+                            "totalPages": 0,
+                            "currentPage": 1,
+                            "pageSize": 10,
+                            "next": None,
+                            "previous": None,
+                        },
+                    },
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # 2. Build base queryset for sent or received transactions
+        direction_param = request.query_params.get("direction", "").strip().lower()
+        if direction_param in ("sent", "outgoing"):
+            filter_q = Q(sender__address__in=user_addresses)
+        elif direction_param in ("received", "incoming"):
+            filter_q = Q(receiverAddress__in=user_addresses) | Q(receiver__address__in=user_addresses)
+        else:
+            filter_q = (
+                Q(sender__address__in=user_addresses)
+                | Q(receiverAddress__in=user_addresses)
+                | Q(receiver__address__in=user_addresses)
+            )
+
+        queryset = (
+            Transaction.objects.filter(filter_q)
+            .select_related("sender", "receiver", "block", "blockchain")
+            .order_by("-createdAt")
+        )
+
+        # 3. Optional filters
+        chain_id_param = request.query_params.get("chainId")
+        if chain_id_param:
+            try:
+                queryset = queryset.filter(blockchain__chainId=int(chain_id_param))
+            except (ValueError, TypeError):
+                return Response(
+                    {"success": False, "reason": "chainId must be a valid integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        status_param = request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param.strip().upper())
+
+        # 4. Paginate
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+
+        serializer_context = {
+            "request": request,
+            "user_addresses": user_addresses,
+        }
+
+        if page is not None:
+            serializer = UserTransactionSerializer(page, many=True, context=serializer_context)
+            pagination_data = paginator.get_paginated_response()
+            tx_data = serializer.data
+        else:
+            serializer = UserTransactionSerializer(queryset, many=True, context=serializer_context)
+            tx_data = serializer.data
+            pagination_data = {
+                "count": len(tx_data),
+                "totalPages": 1,
+                "currentPage": 1,
+                "pageSize": len(tx_data),
+                "next": None,
+                "previous": None,
+            }
+
+        return Response(
+            {
+                "success": True,
+                "data": {
+                    "transactionsData": tx_data,
+                    "paginationData": pagination_data,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class BlockListAPIView(APIView):

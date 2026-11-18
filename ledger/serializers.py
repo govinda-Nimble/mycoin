@@ -133,3 +133,67 @@ class BlockSerializer(serializers.ModelSerializer):
         return None
 
 
+class UserTransactionSerializer(serializers.ModelSerializer):
+    """
+    Serializer for returning transactions with camelCase fields and
+    direction (OUTGOING/INCOMING/SELF) relative to the requesting user.
+    """
+
+    txHash = serializers.CharField(source="hash", read_only=True)
+    senderAddress = serializers.CharField(source="sender.address", read_only=True)
+    receiverAddress = serializers.CharField(read_only=True)
+    amount = serializers.SerializerMethodField()
+    gasPrice = serializers.SerializerMethodField()
+    feePaid = serializers.IntegerField(read_only=True)
+    blockHeight = serializers.IntegerField(source="block.height", read_only=True, default=None)
+    blockHash = serializers.CharField(source="block.blockHash", read_only=True, default=None)
+    chainId = serializers.IntegerField(source="blockchain.chainId", read_only=True)
+    direction = serializers.SerializerMethodField()
+
+    class Meta:
+        from ledger.models import Transaction
+        model = Transaction
+        fields = [
+            "id",
+            "txHash",
+            "chainId",
+            "senderAddress",
+            "receiverAddress",
+            "txType",
+            "amount",
+            "nonce",
+            "gasLimit",
+            "gasPrice",
+            "feePaid",
+            "status",
+            "direction",
+            "blockHeight",
+            "blockHash",
+            "createdAt",
+            "updatedAt",
+        ]
+
+    def get_amount(self, obj):
+        return str(obj.amount)
+
+    def get_gasPrice(self, obj):
+        return str(obj.gasPrice)
+
+    def get_direction(self, obj):
+        user_addresses = self.context.get("user_addresses", set())
+        sender_addr = (obj.sender.address.lower() if obj.sender else "").strip()
+        receiver_addr = (obj.receiverAddress or (obj.receiver.address if obj.receiver else "")).lower().strip()
+
+        is_sender = sender_addr in user_addresses
+        is_receiver = receiver_addr in user_addresses
+
+        if is_sender and is_receiver:
+            return "SELF"
+        elif is_sender:
+            return "OUTGOING"
+        elif is_receiver:
+            return "INCOMING"
+        return "OUTGOING" if is_sender else "INCOMING"
+
+
+

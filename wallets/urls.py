@@ -1,5 +1,5 @@
 from django.urls import path
-from ledger.views import CheckTransactionAPIView
+from ledger.views import CheckTransactionAPIView, UserTransactionsAPIView
 from wallets.views import CheckBalanceAPIView, SignTransactionAPIView
 
 urlpatterns = [
@@ -13,4 +13,9 @@ urlpatterns = [
     
     # Transaction checking & mempool ingestion aliases
     path("transactions/validate/", CheckTransactionAPIView.as_view(), name="wallet-transactions-validate"),
+
+    # Authenticated user transaction history
+    path("transactions/", UserTransactionsAPIView.as_view(), name="wallet-user-transactions"),
+    path("transactions/user/", UserTransactionsAPIView.as_view(), name="wallet-transactions-user"),
+    path("my-transactions/", UserTransactionsAPIView.as_view(), name="wallet-my-transactions"),
 ]
