@@ -1,4 +1,6 @@
 from typing import Optional
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
 from django.utils import timezone
 from accounts.domain import (
     ActivityRecorder,
@@ -9,6 +11,7 @@ from accounts.domain import (
     UserWriter,
     WalletCreator,
 )
+from common.utils import format_database_constraint_error
 
 
 class ConfirmRegisterOtpUseCase:
@@ -93,12 +96,20 @@ class ConfirmRegisterOtpUseCase:
             )
 
         # 4. Create user record
-        user = self._user_writer.create_user(
-            email=clean_email,
-            firstName=first_name,
-            lastName=last_name,
-            is_email_verified=True,
-        )
+        try:
+            user = self._user_writer.create_user(
+                email=clean_email,
+                firstName=first_name,
+                lastName=last_name,
+                is_email_verified=True,
+            )
+        except (IntegrityError, DjangoValidationError) as err:
+            clean_err = format_database_constraint_error(err)
+            return UseCaseResult(
+                success=False,
+                reason=clean_err,
+                status_code=400,
+            )
 
         # 5. Provision Wallet & On-Chain Account with Registration Bonus
         wallet = None

@@ -149,6 +149,23 @@ class NodeSeederTestCase(TestCase):
         self.assertIn("Total Stake:      1,200 MYC", output)
         self.assertTrue(Node.objects.filter(nodeId="myc-val-cli-001").exists())
 
+    def test_seed_blockchain_management_command(self):
+        """Verify seed_blockchain management command successfully seeds the Blockchain record."""
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command(
+            "seed_blockchain",
+            "--name", "MYCOIN",
+            "--symbol", "MYC",
+            "--chain-id", "1001",
+            stdout=out,
+        )
+        output = out.getvalue()
+        self.assertIn("Blockchain record:", output)
+        self.assertTrue(Blockchain.objects.filter(chainId=1001).exists())
+
 
 class NetworkAPITests(TestCase):
     """Test suite for Network REST presentation APIs."""
@@ -177,3 +194,22 @@ class NetworkAPITests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertTrue(response.data["success"])
         self.assertIsInstance(response.data["data"], list)
+
+    def test_genesis_init_endpoint_success(self):
+        """Test POST /api/network/genesis/ initializes a new network."""
+        payload = {
+            "chainId": 2001,
+            "chainName": "API_TEST_CHAIN",
+            "symbol": "ATC",
+        }
+        response = self.client.post("/api/network/genesis/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data["success"])
+        self.assertTrue(Blockchain.objects.filter(chainId=2001).exists())
+
+    def test_genesis_init_missing_fields_returns_400(self):
+        """Test POST /api/network/genesis/ with missing fields returns 400."""
+        response = self.client.post("/api/network/genesis/", {"symbol": "ATC"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(response.data["success"])
+

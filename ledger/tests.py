@@ -11,20 +11,55 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
+from django.db import connection
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from ledger.management.commands.run_mempool_processor import Command as MempoolProcessorCommand
-from ledger.models import MempoolStatus, MempoolTransaction, Transaction, TransactionStatus
+from ledger.models import (
+    Block,
+    BlockStatus,
+    MempoolStatus,
+    MempoolTransaction,
+    Transaction,
+    TransactionEvent,
+    TransactionReceipt,
+    TransactionStatus,
+)
+from ledger.services.block_producer import (
+    approve_single_node_block,
+    execute_single_transaction,
+    finalize_block,
+    prepare_block_proposal,
+    produce_block_from_mempool,
+    produce_next_block,
+    select_transactions_for_block,
+    validate_proposed_block,
+)
+from ledger.services.gossip import gossip_transaction_to_peers, reconcile_block_with_node_mempool
 from ledger.services.mempool_processor import (
     DEFAULT_BATCH_SIZE,
     MempoolProcessingResult,
     process_mempool,
     try_acquire_advisory_lock,
 )
-from network.models import Account, AccountStatus, AccountType, Blockchain, BlockchainStatus
+from ledger.services.transaction_validator import (
+    TransactionValidationError,
+    validate_and_enqueue_transaction,
+)
+from network.models import (
+    Account,
+    AccountStatus,
+    AccountType,
+    Blockchain,
+    BlockchainStatus,
+    Node,
+    NodePeer,
+    NodeType,
+    PeerStatus,
+)
 from network.services.genesis import GenesisConfig, initialize_blockchain
 from network.services.node_seeder import seed_validator_node
 from wallets.models import Wallet, WalletStatus
@@ -120,7 +155,7 @@ class CheckTransactionTestCase(TestCase):
         """Verify valid transaction passes all 8 checks, saves Transaction as PENDING, and creates Mempool entry."""
         payload = self._sign_tx(amount="2000000000", nonce=0)
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
         res_data = response.json()
@@ -148,7 +183,7 @@ class CheckTransactionTestCase(TestCase):
         payload = self._sign_tx()
         payload["senderAddress"] = "0x" + "1" * 40
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "CHECK_SENDER")
 
@@ -156,7 +191,7 @@ class CheckTransactionTestCase(TestCase):
         """Check 2: Self-transfer is rejected."""
         payload = self._sign_tx(receiver_address=self.alice_wallet.address)
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "CHECK_RECEIVER")
 
@@ -166,7 +201,7 @@ class CheckTransactionTestCase(TestCase):
         # Tamper public key with Bob's public key
         payload["publicKey"] = self.bob_wallet.publicKey
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "VERIFY_PUBLIC_KEY")
 
@@ -176,7 +211,7 @@ class CheckTransactionTestCase(TestCase):
         # Tamper amount after signing
         payload["amount"] = "9999999999"
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "VERIFY_SIGNATURE")
 
@@ -187,7 +222,7 @@ class CheckTransactionTestCase(TestCase):
 
         payload = self._sign_tx(nonce=2)
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "CHECK_NONCE")
         self.assertIn("Nonce too low", response.json()["reason"])
@@ -195,12 +230,12 @@ class CheckTransactionTestCase(TestCase):
     def test_check_nonce_conflict_live_tx(self):
         """Check 5: Duplicate nonce on live transaction is rejected."""
         payload1 = self._sign_tx(nonce=0)
-        res1 = self.client.post("/api/ledger/transactions/check/", payload1, format="json")
+        res1 = self.client.post("/api/ledger/transactions/validate/", payload1, format="json")
         self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
 
         # Another transaction with different amount but same nonce 0
         payload2 = self._sign_tx(amount="3000000000", nonce=0)
-        res2 = self.client.post("/api/ledger/transactions/check/", payload2, format="json")
+        res2 = self.client.post("/api/ledger/transactions/validate/", payload2, format="json")
         self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(res2.json()["step"], "CHECK_NONCE")
         self.assertIn("Nonce conflict", res2.json()["reason"])
@@ -210,7 +245,7 @@ class CheckTransactionTestCase(TestCase):
         # Alice only has 1,000 MYC (100,000,000,000 units), try to send 2,000 MYC
         payload = self._sign_tx(amount="200000000000")
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "CHECK_BALANCE")
         self.assertIn("Insufficient balance", response.json()["reason"])
@@ -220,7 +255,7 @@ class CheckTransactionTestCase(TestCase):
         # baseTransferGas is 21000
         payload = self._sign_tx(gas_limit=10000)
 
-        response = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        response = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.json()["step"], "CHECK_GAS")
         self.assertIn("below minimum base transfer gas", response.json()["reason"])
@@ -229,11 +264,11 @@ class CheckTransactionTestCase(TestCase):
         """Check 8: Submitting identical transaction payload twice is rejected."""
         payload = self._sign_tx(nonce=0)
 
-        res1 = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        res1 = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(res1.status_code, status.HTTP_201_CREATED)
 
         # Submit identical payload again
-        res2 = self.client.post("/api/ledger/transactions/check/", payload, format="json")
+        res2 = self.client.post("/api/ledger/transactions/validate/", payload, format="json")
         self.assertEqual(res2.status_code, status.HTTP_400_BAD_REQUEST)
         # It gets caught as nonce conflict or duplicate hash
         self.assertIn(res2.json()["step"], ["CHECK_NONCE", "CHECK_DUPLICATE_HASH"])
@@ -241,10 +276,8 @@ class CheckTransactionTestCase(TestCase):
     def test_endpoint_aliases(self):
         """Verify API is accessible via all configured alias endpoints."""
         endpoints = [
-            "/api/ledger/transactions/check/",
             "/api/ledger/transactions/validate/",
-            "/api/transactions/check/",
-            "/api/wallets/transactions/check/",
+            "/api/wallets/transactions/validate/",
         ]
         for idx, ep in enumerate(endpoints):
             payload = self._sign_tx(nonce=idx, amount=str((idx + 1) * 100000000))
@@ -540,3 +573,1044 @@ class MempoolProcessorTestCase(TestCase):
         output = out.getvalue()
         self.assertIn("MYCOIN Mempool Processor Stopped cleanly", output)
         self.assertIn("Total cycles executed: 1", output)
+
+
+class NodeSpecificMempoolNonceConflictTests(TestCase):
+    """
+    Comprehensive test suite verifying Node-Specific Mempool Nonce Conflict Management:
+    1. Permanent storage allows competing signed transactions with the same sender and nonce.
+    2. Node-level active mempool uniqueness for (node, sender, nonce).
+    3. Multi-node independence: Node A can hold TX001 active while Node B holds TX002 active.
+    4. Duplicate transaction gossip handled idempotently.
+    5. Replacement policy accepts higher gas price and deactivates lower gas price.
+    6. Replacement policy rejects lower/equal gas price without creating a second active entry.
+    7. Block finalization marks winning transaction finalized and updates sender account nonce.
+    8. Block finalization reconciles mempools across nodes by marking competing transactions REPLACED/DROPPED.
+    9. Block finalization removes finalized and competing transactions from active mempools.
+    10. Sequential transactions with different nonces can be queued concurrently.
+    11. Expired or dropped mempool transactions do not block a new active transaction with that nonce.
+    12. Multi-node canonical state convergence.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Drop partial index on test DB if present to allow competing transactions in Transaction model
+        with connection.cursor() as cursor:
+            cursor.execute("DROP INDEX IF EXISTS chain_tx_unique_sender_nonce_live;")
+
+    def setUp(self):
+        # 1. Initialize Blockchain
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_result = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_result.blockchain
+
+        # 2. Seed Node A (Validator)
+        self.node_a_res = seed_validator_node(
+            node_id="node-a-validator",
+            endpoint="http://localhost:8001",
+            node_status="ONLINE",
+        )
+        self.node_a = self.node_a_res.node
+
+        # 3. Seed Node B (Full Node)
+        self.node_b = Node.objects.create(
+            blockchain=self.blockchain,
+            nodeId="node-b-full",
+            nodeType=NodeType.FULL,
+            endpoint="http://localhost:8002",
+            status="ONLINE",
+        )
+
+        # 4. Peer connection from Node A to Node B
+        self.peer_a_b = NodePeer.objects.create(
+            localNode=self.node_a,
+            peerNode=self.node_b,
+            status=PeerStatus.CONNECTED,
+        )
+
+        # 5. Create Alice (Sender) with 1,000 MYC
+        self.alice_user = User.objects.create_user(
+            email="alice_nonce@test.com",
+            firstName="Alice",
+            lastName="Nonce",
+            isEmailVerified=True,
+        )
+        self.alice_wallet = create_wallet_for_user(self.alice_user, name="Alice Nonce Wallet")
+        self.alice_account = Account.objects.create(
+            blockchain=self.blockchain,
+            address=self.alice_wallet.address,
+            accountType=AccountType.EOA,
+            balance=100_000_000_000,
+            nonce=0,
+            status=AccountStatus.ACTIVE,
+        )
+
+        # 6. Create Bob (Receiver 1) & Charlie (Receiver 2)
+        self.bob_user = User.objects.create_user(
+            email="bob_nonce@test.com",
+            firstName="Bob",
+            lastName="Nonce",
+            isEmailVerified=True,
+        )
+        self.bob_wallet = create_wallet_for_user(self.bob_user, name="Bob Nonce Wallet")
+        self.bob_address = self.bob_wallet.address
+
+        self.charlie_user = User.objects.create_user(
+            email="charlie_nonce@test.com",
+            firstName="Charlie",
+            lastName="Nonce",
+            isEmailVerified=True,
+        )
+        self.charlie_wallet = create_wallet_for_user(self.charlie_user, name="Charlie Nonce Wallet")
+        self.charlie_address = self.charlie_wallet.address
+
+    def _sign_tx(self, amount="1000000000", nonce=0, gas_price="2", receiver=None):
+        target_receiver = receiver or self.bob_address
+        sk = self.alice_wallet.get_signing_key()
+        sig_hex, _ = sign_transaction_payload(
+            signing_key=sk,
+            chain_id=self.blockchain.chainId,
+            sender_address=self.alice_wallet.address,
+            receiver_address=target_receiver,
+            amount=str(amount),
+            nonce=int(nonce),
+            gas_limit=21000,
+            gas_price=str(gas_price),
+        )
+        return {
+            "senderAddress": self.alice_wallet.address,
+            "receiverAddress": target_receiver,
+            "amount": str(amount),
+            "nonce": int(nonce),
+            "gasLimit": 21000,
+            "gasPrice": str(gas_price),
+            "publicKey": self.alice_wallet.publicKey,
+            "signature": sig_hex,
+        }
+
+    def test_01_two_different_signed_transactions_with_same_sender_and_nonce_accepted_into_permanent_storage(self):
+        """1. Two different signed transactions with same sender and nonce accepted into permanent storage."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_b)
+
+        self.assertNotEqual(res1.tx_hash, res2.tx_hash)
+        stored_txs = Transaction.objects.filter(sender=self.alice_account, nonce=0)
+        self.assertEqual(stored_txs.count(), 2)
+
+    def test_02_individual_node_allows_only_one_active_mempool_transaction_for_sender_nonce(self):
+        """2. An individual node allows only one active mempool transaction for a given (sender, nonce)."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, gas_price="2", receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, gas_price="2", receiver=self.charlie_address)
+
+        validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+
+        with self.assertRaises(TransactionValidationError) as ctx:
+            validate_and_enqueue_transaction(tx2_payload, node=self.node_a)
+
+        self.assertEqual(ctx.exception.step, "CHECK_NONCE")
+        self.assertIn("Nonce conflict", ctx.exception.message)
+
+        active_count = MempoolTransaction.objects.filter(
+            node=self.node_a,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_03_node_a_holds_tx1_active_while_node_b_holds_tx2_active_for_same_sender_and_nonce(self):
+        """3. Node A holds TX001 active while Node B holds TX002 active for the same sender and nonce."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_b)
+
+        active_a = MempoolTransaction.objects.get(
+            node=self.node_a,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        )
+        active_b = MempoolTransaction.objects.get(
+            node=self.node_b,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        )
+
+        self.assertEqual(active_a.transaction_id, res1.transaction.id)
+        self.assertEqual(active_b.transaction_id, res2.transaction.id)
+        self.assertNotEqual(active_a.transaction_id, active_b.transaction_id)
+
+    def test_04_duplicate_transaction_gossip_handled_idempotently(self):
+        """4. Duplicate transaction gossip is ignored or handled idempotently without creating duplicate active entries."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+
+        # Gossip to Node B for the first time
+        res1 = gossip_transaction_to_peers(tx1_payload, source_node=self.node_a)
+        self.assertEqual(res1[self.node_b.nodeId]["status"], "accepted")
+
+        # Gossip same transaction again
+        res2 = gossip_transaction_to_peers(tx1_payload, source_node=self.node_a)
+        self.assertEqual(res2[self.node_b.nodeId]["status"], "duplicate")
+
+        # Node B must still have exactly 1 mempool transaction
+        count_b = MempoolTransaction.objects.filter(
+            node=self.node_b,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+        ).count()
+        self.assertEqual(count_b, 1)
+
+    def test_05_replacement_policy_accepts_higher_fee_and_deactivates_lower_fee(self):
+        """5. Replacement policy accepts higher gas price and deactivates lower gas price."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, gas_price="2")
+        tx2_payload = self._sign_tx(amount="1500000000", nonce=0, gas_price="5", receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_a)
+
+        res1.mempool_entry.refresh_from_db()
+        self.assertEqual(res1.mempool_entry.status, MempoolStatus.REPLACED)
+
+        res2.mempool_entry.refresh_from_db()
+        self.assertEqual(res2.mempool_entry.status, MempoolStatus.ACTIVE)
+
+        active_count = MempoolTransaction.objects.filter(
+            node=self.node_a,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_06_replacement_policy_rejects_lower_or_equal_fee_without_second_active_entry(self):
+        """6. Replacement policy rejects lower or equal fee without creating a second active entry."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, gas_price="5")
+        tx2_payload = self._sign_tx(amount="1500000000", nonce=0, gas_price="2", receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+
+        with self.assertRaises(TransactionValidationError) as ctx:
+            validate_and_enqueue_transaction(tx2_payload, node=self.node_a)
+
+        self.assertIn("Nonce conflict", ctx.exception.message)
+
+        # tx1 remains active
+        res1.mempool_entry.refresh_from_db()
+        self.assertEqual(res1.mempool_entry.status, MempoolStatus.ACTIVE)
+
+        # tx2 is retained in permanent storage but not active
+        self.assertTrue(Transaction.objects.filter(sender=self.alice_account, amount=1500000000).exists())
+        active_count = MempoolTransaction.objects.filter(
+            node=self.node_a,
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        ).count()
+        self.assertEqual(active_count, 1)
+
+    def test_07_block_finalization_marks_tx_finalized_and_updates_account_nonce(self):
+        """7. Finalization of a block with TX001 marks TX001 finalized and updates sender account nonce."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0)
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+
+        block = produce_block_from_mempool(self.blockchain, [res1.mempool_entry])
+        self.assertIsNotNone(block)
+
+        self.alice_account.refresh_from_db()
+        self.assertEqual(self.alice_account.nonce, 1)
+
+        res1.transaction.refresh_from_db()
+        self.assertEqual(res1.transaction.status, TransactionStatus.FINALIZED)
+
+    def test_08_block_finalization_marks_competing_tx_as_replaced_dropped_across_nodes(self):
+        """8. Block finalization marks competing TX002 as replaced/dropped across nodes."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_b)
+
+        produce_block_from_mempool(self.blockchain, [res1.mempool_entry])
+
+        res2.mempool_entry.refresh_from_db()
+        self.assertEqual(res2.mempool_entry.status, MempoolStatus.REPLACED)
+
+        res2.transaction.refresh_from_db()
+        self.assertEqual(res2.transaction.status, TransactionStatus.DROPPED)
+
+    def test_09_block_finalization_removes_finalized_and_competing_from_active_mempools(self):
+        """9. Block finalization removes finalized and competing transactions from active mempools."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_b)
+
+        produce_block_from_mempool(self.blockchain, [res1.mempool_entry])
+
+        active_entries = MempoolTransaction.objects.filter(
+            transaction__sender=self.alice_account,
+            transaction__nonce=0,
+            status=MempoolStatus.ACTIVE,
+        )
+        self.assertEqual(active_entries.count(), 0)
+
+    def test_10_valid_transactions_with_different_nonces_queued_concurrently(self):
+        """10. Valid transactions with different nonces from the same sender can be queued concurrently."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        tx1 = self._sign_tx(amount="1000000000", nonce=1)
+        tx2 = self._sign_tx(amount="1000000000", nonce=2)
+
+        res0 = validate_and_enqueue_transaction(tx0, node=self.node_a)
+        res1 = validate_and_enqueue_transaction(tx1, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2, node=self.node_a)
+
+        self.assertEqual(res0.mempool_entry.status, MempoolStatus.ACTIVE)
+        self.assertEqual(res1.mempool_entry.status, MempoolStatus.ACTIVE)
+        self.assertEqual(res2.mempool_entry.status, MempoolStatus.ACTIVE)
+
+        active_count = MempoolTransaction.objects.filter(
+            node=self.node_a,
+            transaction__sender=self.alice_account,
+            status=MempoolStatus.ACTIVE,
+        ).count()
+        self.assertEqual(active_count, 3)
+
+    def test_11_expired_or_dropped_mempool_transaction_does_not_block_new_active_transaction(self):
+        """11. Expired or dropped mempool transactions do not block a new active transaction with that nonce."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+
+        # Mark existing mempool entry as EXPIRED and tx as DROPPED
+        res1.mempool_entry.status = MempoolStatus.EXPIRED
+        res1.mempool_entry.save(update_fields=["status", "updatedAt"])
+        res1.transaction.status = TransactionStatus.DROPPED
+        res1.transaction.save(update_fields=["status", "updatedAt"])
+
+        # Submit new transaction with same nonce 0
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_a)
+
+        self.assertEqual(res2.mempool_entry.status, MempoolStatus.ACTIVE)
+
+    def test_12_multi_node_block_processing_produces_identical_canonical_state(self):
+        """12. Multi-node block processing produces identical canonical state across all nodes."""
+        tx1_payload = self._sign_tx(amount="1000000000", nonce=0, receiver=self.bob_address)
+        tx2_payload = self._sign_tx(amount="2000000000", nonce=0, receiver=self.charlie_address)
+
+        res1 = validate_and_enqueue_transaction(tx1_payload, node=self.node_a)
+        res2 = validate_and_enqueue_transaction(tx2_payload, node=self.node_b)
+
+        # Node A produces and finalizes the block
+        block = produce_block_from_mempool(self.blockchain, [res1.mempool_entry])
+
+        # Node B reconciles its local mempool against the finalized block
+        reconcile_res = reconcile_block_with_node_mempool(self.node_b, block)
+        self.assertEqual(reconcile_res["replaced"], 1)
+
+        # Neither node has active entries for nonce 0
+        self.assertFalse(
+            MempoolTransaction.objects.filter(
+                node=self.node_a,
+                transaction__nonce=0,
+                status=MempoolStatus.ACTIVE,
+            ).exists()
+        )
+        self.assertFalse(
+            MempoolTransaction.objects.filter(
+                node=self.node_b,
+                transaction__nonce=0,
+                status=MempoolStatus.ACTIVE,
+            ).exists()
+        )
+
+
+class BlockProductionFlowStages4To14Tests(TestCase):
+    """
+    Unit test suite covering the full Block Production and Finalization Flow (Stages 4–14).
+    Verifies all 20 required scenarios specified in Section 14.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        with connection.cursor() as cursor:
+            cursor.execute("DROP INDEX IF EXISTS chain_tx_unique_sender_nonce_live;")
+
+    def setUp(self):
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_result = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_result.blockchain
+
+        self.node_res = seed_validator_node(
+            node_id="val-node-bp-001",
+            endpoint="http://localhost:8001",
+            node_status="ONLINE",
+        )
+        self.node = self.node_res.node
+        self.validator = self.node_res.validator
+
+        self.alice_user = User.objects.create_user(
+            email="alice_bp@test.com", firstName="Alice", lastName="BP", isEmailVerified=True
+        )
+        self.alice_wallet = create_wallet_for_user(self.alice_user, name="Alice BP Wallet")
+        self.alice_account = Account.objects.create(
+            blockchain=self.blockchain,
+            address=self.alice_wallet.address,
+            accountType=AccountType.EOA,
+            balance=100_000_000_000,
+            nonce=0,
+            status=AccountStatus.ACTIVE,
+        )
+
+        self.bob_user = User.objects.create_user(
+            email="bob_bp@test.com", firstName="Bob", lastName="BP", isEmailVerified=True
+        )
+        self.bob_wallet = create_wallet_for_user(self.bob_user, name="Bob BP Wallet")
+        self.bob_address = self.bob_wallet.address
+
+    def _sign_tx(self, amount="1000000000", nonce=0, gas_price="2", receiver=None):
+        target = receiver or self.bob_address
+        sk = self.alice_wallet.get_signing_key()
+        sig_hex, _ = sign_transaction_payload(
+            signing_key=sk,
+            chain_id=self.blockchain.chainId,
+            sender_address=self.alice_wallet.address,
+            receiver_address=target,
+            amount=str(amount),
+            nonce=int(nonce),
+            gas_limit=21000,
+            gas_price=str(gas_price),
+        )
+        return {
+            "senderAddress": self.alice_wallet.address,
+            "receiverAddress": target,
+            "amount": str(amount),
+            "nonce": int(nonce),
+            "gasLimit": 21000,
+            "gasPrice": str(gas_price),
+            "publicKey": self.alice_wallet.publicKey,
+            "signature": sig_hex,
+        }
+
+    def test_01_eligible_transactions_selected_correctly(self):
+        """1. Eligible transactions are selected correctly from the mempool."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        tx1 = self._sign_tx(amount="2000000000", nonce=1)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        validate_and_enqueue_transaction(tx1, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(selected[0].transaction.nonce, 0)
+        self.assertEqual(selected[1].transaction.nonce, 1)
+
+    def test_02_invalid_transactions_not_selected(self):
+        """2. Invalid transactions (e.g. invalid signature) are not selected."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        res0 = validate_and_enqueue_transaction(tx0, node=self.node)
+
+        # Corrupt the signature of the transaction in the database
+        res0.transaction.signature = "12345678" * 16
+        res0.transaction.save(update_fields=["signature"])
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        self.assertEqual(len(selected), 0)
+
+    def test_03_transactions_with_incorrect_nonce_ordering_not_executed(self):
+        """3. Transactions with incorrect nonce ordering (nonce gap) are not selected."""
+        # Sender submits nonce 0
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        # Alice's account nonce is currently 0. Submitting nonce 2 directly via DB (simulating a gap)
+        tx2_payload = self._sign_tx(amount="1000000000", nonce=2)
+        # Create un-ordered mempool transaction directly
+        tx2 = Transaction.objects.create(
+            blockchain=self.blockchain,
+            hash=hashlib.sha256(b"tx_gap_2").hexdigest(),
+            sender=self.alice_account,
+            receiverAddress=self.bob_address,
+            amount=1000000000,
+            nonce=2,
+            gasLimit=21000,
+            gasPrice=2,
+            publicKey=self.alice_wallet.publicKey,
+            signature=tx2_payload["signature"],
+            status=TransactionStatus.PENDING,
+        )
+        MempoolTransaction.objects.create(
+            transaction=tx2,
+            node=self.node,
+            priority=2,
+            arrivalTime=timezone.now(),
+            expiresAt=timezone.now() + timezone.timedelta(hours=2),
+            status=MempoolStatus.ACTIVE,
+        )
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        # Only nonce 0 can be selected; nonce 2 is skipped due to the missing nonce 1
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].transaction.nonce, 0)
+
+    def test_04_block_gas_limit_respected(self):
+        """4. Block gas limit is strictly respected during selection."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        tx1 = self._sign_tx(amount="1000000000", nonce=1)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        validate_and_enqueue_transaction(tx1, node=self.node)
+
+        # Max gas 30,000: only 1 tx of 21,000 gas can fit
+        selected = select_transactions_for_block(self.blockchain, node=self.node, max_gas=30000)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].transaction.gasLimit, 21000)
+
+    def test_05_block_height_and_parent_hash_correct(self):
+        """5. Block height and parent hash are computed correctly in proposal."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        parent = Block.objects.filter(blockchain=self.blockchain, status=BlockStatus.FINALIZED).order_by("-height").first()
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+
+        self.assertEqual(proposal.height, parent.height + 1)
+        self.assertEqual(proposal.previousHash, parent.blockHash)
+        self.assertEqual(proposal.status, BlockStatus.PROPOSED)
+
+    def test_06_invalid_block_proposals_cannot_be_finalized(self):
+        """6. Invalid block proposals cannot be finalized and are rejected."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+
+        # Tamper with proposal previousHash
+        proposal.previousHash = "0" * 64
+        proposal.save(update_fields=["previousHash"])
+
+        is_valid, reason = validate_proposed_block(proposal)
+        self.assertFalse(is_valid)
+        self.assertIn("does not match parent blockHash", reason)
+
+        approved = approve_single_node_block(proposal)
+        self.assertFalse(approved)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.status, BlockStatus.REJECTED)
+
+    def test_07_valid_block_finalizes_successfully(self):
+        """7. A valid block finalizes successfully."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+
+        self.assertTrue(approve_single_node_block(proposal))
+        finalized = finalize_block(proposal, selected_entries=selected)
+
+        self.assertEqual(finalized.status, BlockStatus.FINALIZED)
+        self.assertIsNotNone(finalized.finalizedAt)
+
+    def test_08_account_balances_updated_correctly(self):
+        """8. Account balances are updated correctly upon block finalization."""
+        initial_balance = self.alice_account.balance
+        amount = 10_000_000_000  # 100 MYC
+        fee = 21000 * 2  # 42,000 units
+        tx0 = self._sign_tx(amount=str(amount), nonce=0, gas_price="2")
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+        finalize_block(proposal, selected_entries=selected)
+
+        self.alice_account.refresh_from_db()
+        self.assertEqual(self.alice_account.balance, initial_balance - (amount + fee))
+
+        bob_account = Account.objects.get(blockchain=self.blockchain, address=self.bob_address)
+        self.assertEqual(bob_account.balance, amount)
+
+    def test_09_sender_nonces_updated_correctly(self):
+        """9. Sender nonces are updated correctly upon finalization."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+        finalize_block(proposal, selected_entries=selected)
+
+        self.alice_account.refresh_from_db()
+        self.assertEqual(self.alice_account.nonce, 1)
+
+    def test_10_gas_fees_follow_existing_protocol_rules(self):
+        """10. Gas fees follow protocol rules and credit proposer validator account."""
+        proposer_account = self.validator.account
+        initial_proposer_balance = proposer_account.balance
+
+        fee = 21000 * 2
+        tx0 = self._sign_tx(amount="1000000000", nonce=0, gas_price="2")
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, proposer=self.validator, selected_entries=selected)
+        finalize_block(proposal, selected_entries=selected)
+
+        proposer_account.refresh_from_db()
+        self.assertEqual(proposer_account.balance, initial_proposer_balance + fee)
+
+    def test_11_receipts_and_events_created_correctly(self):
+        """11. Receipts and execution events are created correctly."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        res0 = validate_and_enqueue_transaction(tx0, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+        finalized_block = finalize_block(proposal, selected_entries=selected)
+
+        receipt = TransactionReceipt.objects.get(transaction=res0.transaction)
+        self.assertEqual(receipt.status, "SUCCESS")
+        self.assertEqual(receipt.block_id, finalized_block.id)
+
+        events = TransactionEvent.objects.filter(transaction=res0.transaction)
+        self.assertTrue(events.filter(eventType="TRANSFER").exists())
+        self.assertTrue(events.filter(eventType="FEE_PAID").exists())
+
+    def test_12_finalized_transactions_removed_from_active_mempool(self):
+        """12. Finalized transactions are marked INCLUDED and removed from active mempool."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        res0 = validate_and_enqueue_transaction(tx0, node=self.node)
+
+        produce_next_block(self.blockchain, node=self.node)
+
+        res0.mempool_entry.refresh_from_db()
+        self.assertEqual(res0.mempool_entry.status, MempoolStatus.INCLUDED)
+
+        active_count = MempoolTransaction.objects.filter(
+            transaction__sender=self.alice_account,
+            status=MempoolStatus.ACTIVE,
+        ).count()
+        self.assertEqual(active_count, 0)
+
+    def test_13_unselected_valid_transactions_remain_in_mempool(self):
+        """13. Unselected valid transactions remain active in the mempool for future blocks."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        tx1 = self._sign_tx(amount="1000000000", nonce=1)
+        res0 = validate_and_enqueue_transaction(tx0, node=self.node)
+        res1 = validate_and_enqueue_transaction(tx1, node=self.node)
+
+        # Batch size 1 selects only nonce 0
+        selected = select_transactions_for_block(self.blockchain, node=self.node, batch_size=1)
+        self.assertEqual(len(selected), 1)
+
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+        finalize_block(proposal, selected_entries=selected)
+
+        res0.mempool_entry.refresh_from_db()
+        self.assertEqual(res0.mempool_entry.status, MempoolStatus.INCLUDED)
+
+        # Nonce 1 remains active
+        res1.mempool_entry.refresh_from_db()
+        self.assertEqual(res1.mempool_entry.status, MempoolStatus.ACTIVE)
+
+    def test_14_competing_transactions_become_stale_after_nonce_finalization(self):
+        """14. Competing transactions become stale (REPLACED/DROPPED) after nonce finalization."""
+        tx0_win = self._sign_tx(amount="1000000000", nonce=0, gas_price="5")
+        tx0_competing = self._sign_tx(amount="1500000000", nonce=0, gas_price="2")
+
+        res_win = validate_and_enqueue_transaction(tx0_win, node=self.node)
+        # Competing tx with lower fee is retained in permanent storage with mempool status REPLACED
+        with self.assertRaises(TransactionValidationError):
+            validate_and_enqueue_transaction(tx0_competing, node=self.node)
+
+        competing_tx = Transaction.objects.get(sender=self.alice_account, amount=1500000000)
+
+        # Finalize block with tx0_win
+        produce_next_block(self.blockchain, node=self.node)
+
+        competing_tx.refresh_from_db()
+        self.assertEqual(competing_tx.status, TransactionStatus.DROPPED)
+
+    def test_15_permanent_transaction_records_retained(self):
+        """15. Permanent transaction records are retained without deletion."""
+        tx0_win = self._sign_tx(amount="1000000000", nonce=0, gas_price="5")
+        tx0_competing = self._sign_tx(amount="1500000000", nonce=0, gas_price="2")
+
+        validate_and_enqueue_transaction(tx0_win, node=self.node)
+        with self.assertRaises(TransactionValidationError):
+            validate_and_enqueue_transaction(tx0_competing, node=self.node)
+
+        produce_next_block(self.blockchain, node=self.node)
+
+        # Both records must still exist in Transaction table
+        stored_txs = Transaction.objects.filter(sender=self.alice_account, nonce=0)
+        self.assertEqual(stored_txs.count(), 2)
+
+    def test_16_failed_finalization_rolls_back_database_changes(self):
+        """16. A failed finalization rolls back all database changes atomically."""
+        initial_balance = self.alice_account.balance
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+
+        # Create another finalized block ahead of this proposal to simulate race condition
+        Block.objects.create(
+            blockchain=self.blockchain,
+            height=proposal.height,
+            parent=proposal.parent,
+            proposer=proposal.proposer,
+            blockHash=hashlib.sha256(b"block_race").hexdigest(),
+            previousHash=proposal.previousHash,
+            merkleRoot="0" * 64,
+            stateRoot="0" * 64,
+            timestamp=timezone.now(),
+            status=BlockStatus.FINALIZED,
+            finalizedAt=timezone.now(),
+        )
+
+        with self.assertRaises(ValueError):
+            finalize_block(proposal, selected_entries=selected)
+
+        self.alice_account.refresh_from_db()
+        self.assertEqual(self.alice_account.balance, initial_balance)
+        self.assertEqual(self.alice_account.nonce, 0)
+
+    def test_17_duplicate_finalization_does_not_apply_financial_changes_twice(self):
+        """17. Duplicate finalization is idempotent and does not apply financial changes twice."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+        proposal = prepare_block_proposal(self.blockchain, selected_entries=selected)
+        finalized_block = finalize_block(proposal, selected_entries=selected)
+
+        self.alice_account.refresh_from_db()
+        balance_after_first = self.alice_account.balance
+
+        # Call finalize again
+        finalize_block(finalized_block, selected_entries=selected)
+
+        self.alice_account.refresh_from_db()
+        self.assertEqual(self.alice_account.balance, balance_after_first)
+        self.assertEqual(self.alice_account.nonce, 1)
+
+    def test_18_overlapping_block_production_attempts_cannot_finalize_conflicting_blocks(self):
+        """18. Two overlapping block production attempts cannot finalize conflicting blocks."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+        selected = select_transactions_for_block(self.blockchain, node=self.node)
+
+        proposal_a = prepare_block_proposal(self.blockchain, selected_entries=selected, round_num=0)
+        proposal_b = prepare_block_proposal(self.blockchain, selected_entries=[], round_num=1)
+
+        # Finalize proposal A
+        finalize_block(proposal_a, selected_entries=selected)
+
+        # Finalize proposal B must fail because parent is no longer the tip
+        with self.assertRaises(ValueError) as ctx:
+            finalize_block(proposal_b, selected_entries=[])
+
+        self.assertIn("is no longer latest finalized block", str(ctx.exception))
+
+    def test_19_management_command_calls_production_service_correctly(self):
+        """19. The 30-second management command calls the production service correctly."""
+        tx0 = self._sign_tx(amount="1000000000", nonce=0)
+        validate_and_enqueue_transaction(tx0, node=self.node)
+
+        out = StringIO()
+        call_command("run_mempool_processor", single_run=True, stdout=out)
+        output = out.getvalue()
+
+        self.assertIn("SUCCESS: Produced Block", output)
+
+        tx_obj = Transaction.objects.get(sender=self.alice_account, nonce=0)
+        self.assertEqual(tx_obj.status, TransactionStatus.FINALIZED)
+
+    def test_20_empty_mempool_case_follows_existing_empty_block_policy(self):
+        """20. The empty-mempool case follows the existing empty-block policy (returns None)."""
+        res = produce_next_block(self.blockchain, node=self.node)
+        self.assertIsNone(res)
+
+
+class BlockListAPITests(TestCase):
+    """
+    Tests for the BlockListAPIView endpoint:
+    - Default pagination of 10 latest blocks (ordered -height)
+    - Next/previous page traversal
+    - Custom pageSize parameter
+    - Query parameter filtering by chainId and status
+    """
+
+    def setUp(self):
+        from network.services.genesis import GenesisConfig, initialize_blockchain
+        from network.services.node_seeder import seed_validator_node
+
+        self.client = APIClient()
+        self.config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.gen_res = initialize_blockchain(self.config)
+        self.blockchain = self.gen_res.blockchain
+
+        self.seeder_res = seed_validator_node(
+            node_id="val-node-blocks-001",
+            endpoint="http://localhost:8001",
+            node_status="ONLINE",
+        )
+        self.validator = self.seeder_res.validator
+
+        self.blockchain.refresh_from_db()
+        parent = self.blockchain.latestFinalizedBlock
+        for h in range(parent.height + 1, 15):
+            block = Block.objects.create(
+                blockchain=self.blockchain,
+                height=h,
+                parent=parent,
+                proposer=self.validator,
+                blockHash=hashlib.sha256(f"block_hash_{h}".encode()).hexdigest(),
+                previousHash=parent.blockHash,
+                merkleRoot="0" * 64,
+                stateRoot="0" * 64,
+                timestamp=timezone.now(),
+                status=BlockStatus.FINALIZED,
+                finalizedAt=timezone.now(),
+            )
+            parent = block
+        self.blockchain.latestFinalizedBlock = parent
+        self.blockchain.save(update_fields=["latestFinalizedBlock"])
+
+    def test_list_blocks_default_pagination_latest_10(self):
+        """Page 1 returns latest 10 blocks ordered by -height with pagination metadata."""
+        response = self.client.get("/api/ledger/blocks/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        
+        pag_data = response.data["data"]["paginationData"]
+        blocks_data = response.data["data"]["blocksData"]
+        
+        self.assertEqual(pag_data["count"], 15)
+        self.assertEqual(pag_data["totalPages"], 2)
+        self.assertEqual(pag_data["currentPage"], 1)
+        self.assertEqual(pag_data["pageSize"], 10)
+        self.assertEqual(len(blocks_data), 10)
+
+        # Check latest ordering (-height: height 14 down to 5)
+        self.assertEqual(blocks_data[0]["height"], 14)
+        self.assertEqual(blocks_data[9]["height"], 5)
+        self.assertIn("page=2", pag_data["next"])
+        self.assertIsNone(pag_data["previous"])
+
+        # Check block serializer schema
+        first_block = blocks_data[0]
+        self.assertIn("blockHash", first_block)
+        self.assertIn("parentHash", first_block)
+        self.assertIn("merkleRoot", first_block)
+        self.assertIn("stateRoot", first_block)
+        self.assertEqual(first_block["chainId"], 1001)
+        self.assertEqual(first_block["status"], "FINALIZED")
+
+    def test_list_blocks_page_2_traversal(self):
+        """Page 2 returns the remaining 5 older blocks (height 4 down to 0)."""
+        response = self.client.get("/api/ledger/blocks/?page=2")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        blocks_data = response.data["data"]["blocksData"]
+        pag_data = response.data["data"]["paginationData"]
+        
+        self.assertEqual(len(blocks_data), 5)
+        self.assertEqual(blocks_data[0]["height"], 4)
+        self.assertEqual(blocks_data[4]["height"], 0)
+        self.assertIsNone(pag_data["next"])
+        self.assertIsNotNone(pag_data["previous"])
+
+    def test_list_blocks_custom_page_size(self):
+        """Passing pageSize=5 yields 5 blocks per page and 3 total pages."""
+        response = self.client.get("/api/ledger/blocks/?pageSize=5")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        pag_data = response.data["data"]["paginationData"]
+        blocks_data = response.data["data"]["blocksData"]
+        
+        self.assertEqual(pag_data["pageSize"], 5)
+        self.assertEqual(pag_data["totalPages"], 3)
+        self.assertEqual(len(blocks_data), 5)
+
+
+class BlockTransactionsAPITests(TestCase):
+    """
+    Tests for BlockTransactionsAPIView:
+    - Return all transactions in a single block using block hash
+    - Support both /blocks/<hash>/transactions/ and /blocks/<hash>/
+    - Return empty list for block with zero transactions
+    - Return 404 for non-existent block hash
+    """
+
+    def setUp(self):
+        from network.services.genesis import GenesisConfig, initialize_blockchain
+        from network.services.node_seeder import seed_validator_node
+
+        self.client = APIClient()
+        self.config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.gen_res = initialize_blockchain(self.config)
+        self.blockchain = self.gen_res.blockchain
+        self.genesis_block = self.gen_res.genesis_block
+
+        self.seeder_res = seed_validator_node(
+            node_id="val-node-txs-001",
+            endpoint="http://localhost:8001",
+            node_status="ONLINE",
+        )
+        self.validator = self.seeder_res.validator
+        self.blockchain.refresh_from_db()
+
+    def test_get_transactions_in_genesis_block(self):
+        """Genesis block returns its mint transactions."""
+        url = f"/api/ledger/blocks/{self.genesis_block.blockHash}/transactions/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+
+        data = response.data["data"]
+        self.assertEqual(data["blockHash"], self.genesis_block.blockHash)
+        self.assertEqual(data["blockHeight"], 0)
+        self.assertEqual(data["chainId"], 1001)
+        self.assertEqual(data["transactionCount"], 3)
+        self.assertEqual(len(data["transactions"]), 3)
+
+        # Check transaction fields
+        first_tx = data["transactions"][0]
+        self.assertIn("txHash", first_tx)
+        self.assertEqual(first_tx["txIndex"], 0)
+        self.assertIn("senderAddress", first_tx)
+        self.assertIn("receiverAddress", first_tx)
+        self.assertIn("amount", first_tx)
+        self.assertEqual(first_tx["status"], TransactionStatus.FINALIZED)
+
+    def test_get_transactions_via_block_detail_url(self):
+        """Block detail URL /api/ledger/blocks/<hash>/ also returns block transactions."""
+        url = f"/api/ledger/blocks/{self.genesis_block.blockHash}/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["data"]["transactionCount"], 3)
+
+    def test_get_transactions_empty_block(self):
+        """An empty block with 0 transactions returns an empty list."""
+        parent = self.blockchain.latestFinalizedBlock
+        empty_block = Block.objects.create(
+            blockchain=self.blockchain,
+            height=parent.height + 1,
+            parent=parent,
+            proposer=self.validator,
+            blockHash=hashlib.sha256(b"empty_test_block").hexdigest(),
+            previousHash=parent.blockHash,
+            merkleRoot="0" * 64,
+            stateRoot="0" * 64,
+            timestamp=timezone.now(),
+            status=BlockStatus.FINALIZED,
+            transactionCount=0,
+            finalizedAt=timezone.now(),
+        )
+
+        url = f"/api/ledger/blocks/{empty_block.blockHash}/transactions/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        self.assertEqual(response.data["data"]["transactionCount"], 0)
+        self.assertEqual(response.data["data"]["transactions"], [])
+
+    def test_get_transactions_non_existent_block_returns_404(self):
+        """Querying a non-existent block hash returns 404."""
+        non_existent_hash = "0" * 64
+        url = f"/api/ledger/blocks/{non_existent_hash}/transactions/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data["success"])
+        self.assertIn(f"Block with hash '{non_existent_hash}' not found", response.data["reason"])
+
+
+class TransactionDetailAPITests(TestCase):
+    """Integration tests for TransactionDetailAPIView (/api/ledger/transactions/<tx_hash>/)."""
+
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.genesis_config = GenesisConfig(chain_id=1001, chain_name="TEST_CHAIN")
+        self.genesis_res = initialize_blockchain(self.genesis_config)
+        self.blockchain = self.genesis_res.blockchain
+
+        self.seed_res = seed_validator_node(
+            node_id="val-tx-detail-001",
+            endpoint="http://localhost:8001",
+            stake_amount_myc=1000,
+            node_status="ONLINE",
+        )
+        self.node = self.seed_res.node
+
+        # Create sender wallet & account
+        self.sender_user = get_user_model().objects.create_user(
+            email="sender_detail@test.com",
+            firstName="Sender",
+            lastName="Detail",
+        )
+        self.sender_wallet = create_wallet_for_user(self.sender_user)
+        self.sender_account = Account.objects.create(
+            blockchain=self.blockchain,
+            address=self.sender_wallet.address,
+            accountType=AccountType.EOA,
+            balance=10_000_000_000,
+            nonce=0,
+            status=AccountStatus.ACTIVE,
+        )
+
+        self.tx_hash = "0x" + hashlib.sha256(b"detail_test_tx").hexdigest()
+        self.tx = Transaction.objects.create(
+            hash=self.tx_hash[2:],
+            blockchain=self.blockchain,
+            sender=self.sender_account,
+            receiverAddress="0x" + "22" * 20,
+            txType="TRANSFER",
+            amount=1_000_000,
+            nonce=0,
+            gasLimit=21000,
+            gasPrice=1,
+            publicKey="04" + "aa" * 64,
+            signature="0x" + "bb" * 64,
+            status=TransactionStatus.PENDING,
+        )
+
+    def test_get_transaction_detail_success(self):
+        url = f"/api/ledger/transactions/{self.tx_hash}/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+        data = response.data["data"]
+        self.assertEqual(data["txHash"], self.tx.hash)
+        self.assertEqual(data["senderAddress"], self.sender_account.address)
+        self.assertEqual(data["receiverAddress"], "0x" + "22" * 20)
+        self.assertEqual(data["status"], "PENDING")
+
+    def test_get_transaction_detail_alias_route(self):
+        url = f"/api/transactions/{self.tx_hash}/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+
+    def test_get_transaction_detail_without_0x_prefix(self):
+        url = f"/api/ledger/transactions/{self.tx_hash[2:]}/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["success"])
+
+    def test_get_transaction_detail_not_found(self):
+        non_existent = "0x" + "ff" * 32
+        url = f"/api/ledger/transactions/{non_existent}/"
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertFalse(response.data["success"])
+
+
+

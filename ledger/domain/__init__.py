@@ -16,7 +16,7 @@ class UseCaseResult:
 class TransactionValidator(Protocol):
     """Abstract contract for validating and enqueuing signed transactions into the mempool."""
 
-    def validate_and_enqueue(self, payload: dict[str, Any]) -> Any:
+    def validate_and_enqueue(self, payload: dict[str, Any], *, node: Optional[Any] = None) -> Any:
         ...
 
 

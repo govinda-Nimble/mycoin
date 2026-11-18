@@ -1,5 +1,10 @@
 import logging
 from typing import Any
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
+
+from common.models import ImmutableRecordError
+from common.utils import format_database_constraint_error
 from wallets.domain import TransactionSigner, UseCaseResult
 
 logger = logging.getLogger(__name__)
@@ -38,11 +43,18 @@ class SignTransactionUseCase:
                 reason=str(err),
                 status_code=400,
             )
+        except (IntegrityError, DjangoValidationError, ImmutableRecordError) as err:
+            clean_err = format_database_constraint_error(err)
+            return UseCaseResult(
+                success=False,
+                reason=clean_err,
+                status_code=400,
+            )
         except Exception as err:
             logger.exception("Failed to sign transaction: %s", err)
             return UseCaseResult(
                 success=False,
-                reason=f"Failed to sign transaction: {err}",
+                reason="Failed to sign transaction due to an internal error.",
                 status_code=500,
             )
 

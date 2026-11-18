@@ -19,10 +19,13 @@ import hashlib
 import logging
 from typing import Any, Dict, Optional
 
-from django.db import models, transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 import ecdsa
 
+from common.models import ImmutableRecordError
+from common.utils import format_database_constraint_error
 from ledger.models import (
     MempoolStatus,
     MempoolTransaction,
@@ -89,7 +92,10 @@ def compute_transaction_hash(canonical_digest: bytes, raw_signature_bytes: bytes
     return hashlib.sha256(canonical_digest + raw_signature_bytes).hexdigest().lower()
 
 
-def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionValidationResult:
+def validate_and_enqueue_transaction(
+    payload: Dict[str, Any],
+    node: Optional[Node] = None,
+) -> TransactionValidationResult:
     """
     Executes the full transaction verification pipeline and persists
     the transaction and its mempool entry atomically.
@@ -104,6 +110,8 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
             - gasPrice
             - publicKey
             - signature
+        node: Optional target Node instance whose local mempool will ingest the transaction.
+            If None, the first active ONLINE node for the blockchain is used.
 
     Returns:
         TransactionValidationResult on success.
@@ -150,6 +158,20 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
         raise TransactionValidationError(
             f"Sender account '{sender_address}' is not active (current status: {sender_account.status}).",
             step="CHECK_SENDER",
+        )
+
+    # Resolve target Node for local mempool
+    if node is None:
+        node = Node.objects.filter(blockchain=blockchain, status="ONLINE").first()
+        if not node:
+            raise TransactionValidationError(
+                "Please try again later as there is no active node exists.",
+                step="NO_ACTIVE_NODE_EXISTS",
+            )
+    elif node.blockchain_id != blockchain.id:
+        raise TransactionValidationError(
+            f"Node '{node.nodeId}' belongs to another blockchain.",
+            step="NODE_MISMATCH",
         )
 
     # -------------------------------------------------------------
@@ -253,81 +275,7 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
         )
 
     # -------------------------------------------------------------
-    # 5. Check Nonce
-    # -------------------------------------------------------------
-    now = timezone.now()
-    # Evict expired active mempool transactions for this sender before nonce validation
-    expired_mtxs = MempoolTransaction.objects.filter(
-        transaction__sender=sender_account,
-        status=MempoolStatus.ACTIVE,
-        expiresAt__lte=now,
-    )
-    if expired_mtxs.exists():
-        expired_tx_ids = list(expired_mtxs.values_list("transaction_id", flat=True))
-        expired_mtxs.update(status=MempoolStatus.EXPIRED)
-        Transaction.objects.filter(
-            id__in=expired_tx_ids,
-            status=TransactionStatus.PENDING,
-            block__isnull=True,
-        ).update(status=TransactionStatus.DROPPED)
-
-    if nonce_int < sender_account.nonce:
-        raise TransactionValidationError(
-            f"Nonce too low: sender account finalized nonce is {sender_account.nonce}, but received {nonce_int}.",
-            step="CHECK_NONCE",
-        )
-
-    # Check for live nonce conflicts
-    existing_nonce_tx = Transaction.objects.filter(
-        sender=sender_account,
-        nonce=nonce_int,
-    ).exclude(status__in=NONCE_FREE_STATUSES).first()
-
-    if existing_nonce_tx:
-        raise TransactionValidationError(
-            f"Nonce conflict: a live transaction ({existing_nonce_tx.hash[:12]}...) with nonce {nonce_int} already exists in status '{existing_nonce_tx.status}'.",
-            step="CHECK_NONCE",
-        )
-
-    # Check sequential nonce gap
-    pending_count = Transaction.objects.filter(
-        sender=sender_account,
-        status=TransactionStatus.PENDING,
-    ).count()
-    expected_nonce = sender_account.nonce + pending_count
-
-    if nonce_int > expected_nonce:
-        raise TransactionValidationError(
-            f"Nonce gap detected: expected next nonce {expected_nonce}, but received {nonce_int}.",
-            step="CHECK_NONCE",
-        )
-
-    # -------------------------------------------------------------
-    # 6. Check Balance
-    # -------------------------------------------------------------
-    gas_fee = gas_limit_int * gas_price_int
-    total_cost = amount_int + gas_fee
-
-    # Calculate funds already locked by earlier pending transactions from this sender
-    pending_committed = Transaction.objects.filter(
-        sender=sender_account,
-        status=TransactionStatus.PENDING,
-    ).aggregate(
-        total=models.Sum(models.F("amount") + (models.F("gasLimit") * models.F("gasPrice")))
-    )["total"] or 0
-
-    available_balance = sender_account.balance - pending_committed
-
-    if available_balance < total_cost:
-        multiplier = 10 ** blockchain.decimals
-        raise TransactionValidationError(
-            f"Insufficient balance: sender on-chain balance is {sender_account.balance:,} units (available: {available_balance:,} units), "
-            f"but this transaction requires {total_cost:,} units ({amount_int:,} transfer + {gas_fee:,} max fee).",
-            step="CHECK_BALANCE",
-        )
-
-    # -------------------------------------------------------------
-    # 7. Check Gas
+    # 5. Check Gas
     # -------------------------------------------------------------
     if gas_limit_int < blockchain.baseTransferGas:
         raise TransactionValidationError(
@@ -348,65 +296,215 @@ def validate_and_enqueue_transaction(payload: Dict[str, Any]) -> TransactionVali
         )
 
     # -------------------------------------------------------------
-    # 8. Check Duplicate Hash
+    # 6. Compute Transaction Hash
     # -------------------------------------------------------------
     tx_hash = compute_transaction_hash(digest, raw_sig_bytes)
-    if Transaction.objects.filter(hash=tx_hash).exists():
-        raise TransactionValidationError(
-            f"Duplicate transaction: transaction with hash {tx_hash} already recorded on the ledger.",
-            step="CHECK_DUPLICATE_HASH",
-        )
 
     # -------------------------------------------------------------
-    # 9. Save Transaction & 10. Create MempoolTransaction (Atomic)
+    # 7. Nonce, Node Mempool Conflict, Balance & Atomic Ingestion
     # -------------------------------------------------------------
+    now = timezone.now()
+    conflict_rejection: Optional[str] = None
+
     with transaction.atomic():
-        # Persist verified Transaction with status=PENDING
-        tx = Transaction.objects.create(
-            hash=tx_hash,
-            blockchain=blockchain,
-            sender=sender_account,
-            receiverAddress=receiver_address,
-            receiver=receiver_account,
-            txType=TransactionType.TRANSFER,
-            amount=amount_int,
-            nonce=nonce_int,
-            gasLimit=gas_limit_int,
-            gasPrice=gas_price_int,
-            publicKey="04" + clean_pk,
-            signature=clean_sig,
-            status=TransactionStatus.PENDING,
-        )
-        tx.full_clean()
+        # Lock sender account to serialize concurrent submissions for this sender
+        sender_account = Account.objects.select_for_update().get(id=sender_account.id)
 
-        # Resolve or auto-seed active node for the mempool entry
-        node = Node.objects.filter(blockchain=blockchain, status="ONLINE").first()
-        if not node:
-            raise TransactionValidationError(
-                f"Please try again later as there is no active node exists.",
-                step="NO_ACTIVE_NODE_EXISTS",
-            )
-        # if not node:
-        #     node = Node.objects.filter(blockchain=blockchain).first()
-        # if not node:
-        #     from network.services.node_seeder import seed_validator_node
-        #     seed_res = seed_validator_node(node_id="myc-val-node-001", node_status="ONLINE")
-        #     node = seed_res.node
-
-        now = timezone.now()
-        mempool_entry = MempoolTransaction.objects.create(
-            transaction=tx,
+        # Evict expired active mempool transactions for this sender on this node
+        expired_mtxs = MempoolTransaction.objects.filter(
             node=node,
-            priority=gas_price_int,
-            arrivalTime=now,
-            expiresAt=now + timezone.timedelta(hours=2),
+            transaction__sender=sender_account,
             status=MempoolStatus.ACTIVE,
+            expiresAt__lte=now,
         )
-        mempool_entry.full_clean()
+        if expired_mtxs.exists():
+            expired_tx_ids = list(expired_mtxs.values_list("transaction_id", flat=True))
+            expired_mtxs.update(status=MempoolStatus.EXPIRED)
+            active_elsewhere = MempoolTransaction.objects.filter(
+                transaction_id__in=expired_tx_ids,
+                status=MempoolStatus.ACTIVE,
+            ).values_list("transaction_id", flat=True)
+            Transaction.objects.filter(
+                id__in=expired_tx_ids,
+                status=TransactionStatus.PENDING,
+                block__isnull=True,
+            ).exclude(id__in=active_elsewhere).update(status=TransactionStatus.DROPPED)
+
+        # Check account finalized nonce
+        if nonce_int < sender_account.nonce:
+            raise TransactionValidationError(
+                f"Nonce too low: sender account finalized nonce is {sender_account.nonce}, but received {nonce_int}.",
+                step="CHECK_NONCE",
+            )
+
+        # Check for active mempool transaction for (node, sender, nonce)
+        active_mtx = (
+            MempoolTransaction.objects.filter(
+                node=node,
+                transaction__sender=sender_account,
+                transaction__nonce=nonce_int,
+                status=MempoolStatus.ACTIVE,
+                expiresAt__gt=now,
+            )
+            .select_related("transaction")
+            .first()
+        )
+
+        if active_mtx:
+            # Case 1: Duplicate transaction hash (idempotent gossip or resubmission)
+            if active_mtx.transaction.hash == tx_hash:
+                raise TransactionValidationError(
+                    f"Duplicate transaction: transaction with hash {tx_hash} already recorded on the ledger.",
+                    step="CHECK_DUPLICATE_HASH",
+                )
+
+            # Case 2: Competing transaction with different hash for the same (node, sender, nonce)
+            if gas_price_int > active_mtx.transaction.gasPrice:
+                # Fee-bump replacement: deactivate active transaction in this node's mempool
+                old_mtx = active_mtx
+                old_mtx.status = MempoolStatus.REPLACED
+                old_mtx.save(update_fields=["status", "updatedAt"])
+                # If old transaction is not active in any other node's mempool, mark it DROPPED
+                if not MempoolTransaction.objects.filter(
+                    transaction=old_mtx.transaction, status=MempoolStatus.ACTIVE
+                ).exists():
+                    Transaction.objects.filter(
+                        id=old_mtx.transaction_id, status=TransactionStatus.PENDING
+                    ).update(status=TransactionStatus.DROPPED)
+            else:
+                # Lower or equal fee: keep existing active transaction in node mempool.
+                # Retain the competing signed transaction in permanent storage.
+                competing_tx, _ = Transaction.objects.get_or_create(
+                    blockchain=blockchain,
+                    hash=tx_hash,
+                    defaults={
+                        "sender": sender_account,
+                        "receiverAddress": receiver_address,
+                        "receiver": receiver_account,
+                        "txType": TransactionType.TRANSFER,
+                        "amount": amount_int,
+                        "nonce": nonce_int,
+                        "gasLimit": gas_limit_int,
+                        "gasPrice": gas_price_int,
+                        "publicKey": "04" + clean_pk,
+                        "signature": clean_sig,
+                        "status": TransactionStatus.DROPPED,
+                    },
+                )
+                MempoolTransaction.objects.get_or_create(
+                    node=node,
+                    transaction=competing_tx,
+                    defaults={
+                        "priority": gas_price_int,
+                        "arrivalTime": now,
+                        "expiresAt": now + timezone.timedelta(hours=2),
+                        "status": MempoolStatus.REPLACED,
+                    },
+                )
+                conflict_rejection = (
+                    f"Nonce conflict: an active transaction ({active_mtx.transaction.hash[:12]}...) with nonce {nonce_int} and higher or equal gas price ({active_mtx.transaction.gasPrice} >= {gas_price_int}) already exists in this node's mempool."
+                )
+
+        if not conflict_rejection:
+            # Check for sequential nonce gap on this node
+            active_nonces = set(
+                MempoolTransaction.objects.filter(
+                    node=node,
+                    transaction__sender=sender_account,
+                    status=MempoolStatus.ACTIVE,
+                    expiresAt__gt=now,
+                ).values_list("transaction__nonce", flat=True)
+            )
+            missing_nonces = [n for n in range(sender_account.nonce, nonce_int) if n not in active_nonces]
+            if missing_nonces:
+                expected_next = min(missing_nonces)
+                raise TransactionValidationError(
+                    f"Nonce gap detected: expected next nonce {expected_next}, but received {nonce_int}.",
+                    step="CHECK_NONCE",
+                )
+
+            # Check Balance (funds committed by other active transactions on this node)
+            gas_fee = gas_limit_int * gas_price_int
+            total_cost = amount_int + gas_fee
+
+            active_committed = (
+                MempoolTransaction.objects.filter(
+                    node=node,
+                    transaction__sender=sender_account,
+                    status=MempoolStatus.ACTIVE,
+                    expiresAt__gt=now,
+                )
+                .exclude(transaction__nonce=nonce_int)
+                .aggregate(
+                    total=models.Sum(
+                        models.F("transaction__amount")
+                        + (models.F("transaction__gasLimit") * models.F("transaction__gasPrice"))
+                    )
+                )["total"]
+                or 0
+            )
+
+            available_balance = sender_account.balance - active_committed
+            if available_balance < total_cost:
+                raise TransactionValidationError(
+                    f"Insufficient balance: sender on-chain balance is {sender_account.balance:,} units (available: {available_balance:,} units), "
+                    f"but this transaction requires {total_cost:,} units ({amount_int:,} transfer + {gas_fee:,} max fee).",
+                    step="CHECK_BALANCE",
+                )
+
+            try:
+                # Check duplicate hash against finalized/failed transactions
+                existing_tx = Transaction.objects.filter(blockchain=blockchain, hash=tx_hash).first()
+                if existing_tx:
+                    if existing_tx.status in [TransactionStatus.FINALIZED, TransactionStatus.FAILED]:
+                        raise TransactionValidationError(
+                            f"Duplicate transaction: transaction with hash {tx_hash} already recorded on the ledger in status '{existing_tx.status}'.",
+                            step="CHECK_DUPLICATE_HASH",
+                        )
+                    tx = existing_tx
+                    if tx.status in [TransactionStatus.REPLACED, TransactionStatus.DROPPED]:
+                        tx.status = TransactionStatus.PENDING
+                        tx.save(update_fields=["status", "updatedAt"])
+                else:
+                    tx = Transaction.objects.create(
+                        hash=tx_hash,
+                        blockchain=blockchain,
+                        sender=sender_account,
+                        receiverAddress=receiver_address,
+                        receiver=receiver_account,
+                        txType=TransactionType.TRANSFER,
+                        amount=amount_int,
+                        nonce=nonce_int,
+                        gasLimit=gas_limit_int,
+                        gasPrice=gas_price_int,
+                        publicKey="04" + clean_pk,
+                        signature=clean_sig,
+                        status=TransactionStatus.PENDING,
+                    )
+                    tx.full_clean()
+
+                mempool_entry, _ = MempoolTransaction.objects.update_or_create(
+                    node=node,
+                    transaction=tx,
+                    defaults={
+                        "priority": gas_price_int,
+                        "arrivalTime": now,
+                        "expiresAt": now + timezone.timedelta(hours=2),
+                        "status": MempoolStatus.ACTIVE,
+                    },
+                )
+                mempool_entry.full_clean()
+            except (IntegrityError, DjangoValidationError, ImmutableRecordError) as exc:
+                clean_err = format_database_constraint_error(exc)
+                raise TransactionValidationError(clean_err, step="CHECK_CONSTRAINTS") from exc
+
+    if conflict_rejection:
+        raise TransactionValidationError(conflict_rejection, step="CHECK_NONCE")
 
     logger.info(
-        "Transaction %s validated and queued into mempool (sender: %s, amount: %d, priority: %d)",
+        "Transaction %s validated and queued into mempool of node %s (sender: %s, amount: %d, priority: %d)",
         tx_hash[:12],
+        node.nodeId,
         sender_address,
         amount_int,
         gas_price_int,

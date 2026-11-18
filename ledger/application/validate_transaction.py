@@ -1,5 +1,10 @@
 import logging
 from typing import Any
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
+
+from common.models import ImmutableRecordError
+from common.utils import format_database_constraint_error
 from ledger.domain import TransactionValidator, UseCaseResult
 from ledger.services.transaction_validator import TransactionValidationError
 
@@ -37,6 +42,13 @@ class ValidateTransactionUseCase:
                 "expiresAt": mempool.expiresAt.isoformat(),
             }
 
+            # # Gossip original signed transaction data to connected peers
+            # try:
+            #     from ledger.services.gossip import gossip_transaction_to_peers
+            #     gossip_transaction_to_peers(payload, mempool.node)
+            # except Exception as exc:
+            #     logger.warning("Peer gossip encountered an issue: %s", exc)
+
             return UseCaseResult(
                 success=True,
                 reason=result.message,
@@ -50,11 +62,19 @@ class ValidateTransactionUseCase:
                 status_code=400,
                 step=err.step,
             )
+        except (IntegrityError, DjangoValidationError, ImmutableRecordError) as err:
+            clean_err = format_database_constraint_error(err)
+            return UseCaseResult(
+                success=False,
+                reason=clean_err,
+                status_code=400,
+                step="CHECK_CONSTRAINTS",
+            )
         except Exception as err:
             logger.exception("Unexpected error in ValidateTransactionUseCase: %s", err)
             return UseCaseResult(
                 success=False,
-                reason=f"Internal transaction processing error: {str(err)}",
+                reason="An unexpected internal error occurred during transaction processing.",
                 status_code=500,
             )
 

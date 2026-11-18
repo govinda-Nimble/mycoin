@@ -44,14 +44,15 @@ class TransactionStatus(models.TextChoices):
     FAILED = "FAILED", "Failed (executed in a finalized block)"
     REJECTED = "REJECTED", "Rejected (invalid before inclusion)"
     DROPPED = "DROPPED", "Dropped (evicted/expired)"
+    REPLACED = "REPLACED", "Replaced"
 
 
 # Statuses in which a transaction is not part of any block.
-NO_BLOCK_STATUSES = ["CREATED", "SIGNED", "VALIDATED", "PENDING", "REJECTED", "DROPPED"]
+NO_BLOCK_STATUSES = ["CREATED", "SIGNED", "VALIDATED", "PENDING", "REJECTED", "DROPPED", "REPLACED"]
 # Statuses in which a transaction may still be unsigned.
-UNSIGNED_ALLOWED_STATUSES = ["CREATED", "REJECTED", "DROPPED"]
+UNSIGNED_ALLOWED_STATUSES = ["CREATED", "REJECTED", "DROPPED", "REPLACED"]
 # Statuses that do not occupy a (sender, nonce) slot.
-NONCE_FREE_STATUSES = ["REJECTED", "DROPPED", "FAILED"]
+NONCE_FREE_STATUSES = ["REJECTED", "DROPPED", "FAILED", "REPLACED"]
 
 
 class ReceiptStatus(models.TextChoices):
@@ -264,12 +265,6 @@ class Transaction(BaseModel):
                 "chain_tx_signature_required",
             ),
             check(Q(signature="") | ~Q(publicKey=""), "chain_tx_public_key_with_signature"),
-            # Anti double-spend / nonce conflict: one live transaction per (sender, nonce).
-            models.UniqueConstraint(
-                fields=["sender", "nonce"],
-                condition=~Q(status__in=NONCE_FREE_STATUSES),
-                name="chain_tx_unique_sender_nonce_live",
-            ),
         ]
         indexes = [
             models.Index(fields=["blockchain", "status"]),

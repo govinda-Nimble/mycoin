@@ -20,7 +20,10 @@ from ledger.models import (
     Transaction,
     TransactionStatus,
 )
-from ledger.services.block_producer import produce_block_from_mempool
+from ledger.services.block_producer import (
+    produce_block_from_mempool,
+    select_transactions_for_block,
+)
 from network.models import Blockchain, BlockchainStatus
 
 logger = logging.getLogger("ledger.mempool_processor")
@@ -167,12 +170,10 @@ def process_mempool(
                 message="Mempool is empty. No eligible transactions available.",
             )
 
-        # 5. Concurrency protection layer 2: Row-level lock on candidate batch (skip_locked)
-        # Prioritize by fee/priority descending, then FIFO arrival time ascending
-        selected_batch = list(
-            eligible_base_qs.select_for_update(skip_locked=True)
-            .select_related("transaction", "transaction__sender", "node")
-            .order_by("-priority", "arrivalTime")[:batch_size]
+        # 5. Select prioritized transactions using Stage 4 selection service
+        selected_batch = select_transactions_for_block(
+            blockchain=blockchain,
+            batch_size=batch_size,
         )
 
         duration = round(time.perf_counter() - start_time, 4)

@@ -91,3 +91,45 @@ class CheckTransactionSerializer(serializers.Serializer):
             raise serializers.ValidationError("signature must be 128 hex characters (64 bytes raw r+s).")
         return "0x" + clean_sig
 
+
+class BlockSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Block entity returning camelCase formatted fields.
+    """
+
+    chainId = serializers.IntegerField(source="blockchain.chainId", read_only=True)
+    chainName = serializers.CharField(source="blockchain.name", read_only=True)
+    parentHash = serializers.CharField(source="previousHash", read_only=True)
+    proposerAddress = serializers.SerializerMethodField()
+
+    class Meta:
+        from ledger.models import Block
+        model = Block
+        fields = [
+            "id",
+            "chainId",
+            "chainName",
+            "height",
+            "blockHash",
+            "parentHash",
+            "previousHash",
+            "merkleRoot",
+            "stateRoot",
+            "timestamp",
+            "proposerAddress",
+            "status",
+            "transactionCount",
+            "gasUsed",
+            "blockReward",
+            "epoch",
+            "round",
+            "finalizedAt",
+            "createdAt",
+        ]
+
+    def get_proposerAddress(self, obj):
+        if obj.proposer and getattr(obj.proposer, "account", None):
+            return obj.proposer.account.address
+        return None
+
+

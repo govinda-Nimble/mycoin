@@ -1,4 +1,8 @@
 from typing import Any
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError
+
+from common.utils import format_database_constraint_error
 from wallets.domain import UseCaseResult, WalletWriter
 
 
@@ -24,10 +28,17 @@ class CreateWalletUseCase:
                     "name": wallet.name,
                 },
             )
+        except (IntegrityError, DjangoValidationError) as err:
+            clean_err = format_database_constraint_error(err)
+            return UseCaseResult(
+                success=False,
+                reason=clean_err,
+                status_code=400,
+            )
         except Exception as err:
             return UseCaseResult(
                 success=False,
-                reason=f"Failed to create wallet: {err}",
+                reason="Failed to create wallet due to an internal error.",
                 status_code=500,
             )
 

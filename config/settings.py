@@ -2,7 +2,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
-
+from corsheaders.defaults import default_headers
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -11,10 +11,18 @@ load_dotenv(BASE_DIR / '.env.local')
 
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
-DEBUG = os.getenv('DEBUG')
+DEBUG = os.getenv('DEBUG', 'False').lower() in ('true', '1', 't')
 
 ALLOWED_HOSTS = ['*']
 
+CORS_ALLOW_ALL_ORIGINS = True # "CORS_ORIGIN_ALLOW_ALL"  this is old syntax for
+
+CORS_ALLOW_HEADERS = [
+    *default_headers
+]
+CSRF_TRUSTED_ORIGINS = [
+   '*'
+]
 
 # Application definition
 
@@ -27,6 +35,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
 
     # Third-party apps
+    'corsheaders',
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
@@ -46,6 +55,7 @@ INSTALLED_APPS = [
 AUTH_USER_MODEL = 'accounts.User'
 
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
 
     # Log incoming requests and API responses
@@ -125,8 +135,15 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR, "static"),
+] if (BASE_DIR / "static").exists() else []
 
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
@@ -153,6 +170,7 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.AllowAny',
     ),
+    'EXCEPTION_HANDLER': 'common.exceptions.custom_exception_handler',
 }
 
 
@@ -183,17 +201,11 @@ LOGGING = {
         },
     },
 
-    # "filters": {
-    #     "request_context": {
-    #         "()": "jamaset_auth.logging_filters.RequestContextFilter",
-    #     },
-    # },
 
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": "default",
-            # "filters": ["request_context"],
         },
 
         "file": {
@@ -204,9 +216,7 @@ LOGGING = {
             "backupCount": 5,
             "encoding": "utf-8",
             "formatter": "verbose",
-            # "filters": ["request_context"],
         },
-        # for production use Console/stdout → CloudWatch or centralized logging
     },
 
     "loggers": {

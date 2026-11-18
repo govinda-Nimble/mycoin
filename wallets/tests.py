@@ -257,7 +257,7 @@ class RegistrationWalletIntegrationTests(TestCase):
 
         # Submit to Check Transaction API
         client = APIClient()
-        check_res = client.post("/api/ledger/transactions/check/", signed_tx, format="json")
+        check_res = client.post("/api/ledger/transactions/validate/", signed_tx, format="json")
         self.assertEqual(check_res.status_code, 201)
         self.assertTrue(check_res.json()["success"])
         self.assertEqual(check_res.json()["data"]["status"], "PENDING")
@@ -316,7 +316,7 @@ class SignTransactionAPITests(TestCase):
         self.assertEqual(data["amount"], "1000000000")
         self.assertEqual(data["nonce"], 0)
         self.assertEqual(data["gasLimit"], 21000)
-        self.assertEqual(data["gasPrice"], "2")
+        self.assertEqual(data["gasPrice"], str(self.blockchain.minGasPrice))
         self.assertEqual(data["publicKey"], self.wallet.publicKey)
         self.assertTrue(data["signature"].startswith("0x"))
         self.assertEqual(len(data["signature"]), 130)  # 0x + 128 hex chars (64 bytes r+s)
@@ -330,7 +330,7 @@ class SignTransactionAPITests(TestCase):
             amount="1000000000",
             nonce=0,
             gas_limit=21000,
-            gas_price="2",
+            gas_price=str(self.blockchain.minGasPrice),
         )
         sig_raw = bytes.fromhex(data["signature"][2:])
         verified = vk.verify(

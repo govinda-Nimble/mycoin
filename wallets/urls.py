@@ -9,8 +9,8 @@ urlpatterns = [
     
     # Transaction signing endpoint
     path("transactions/sign/", SignTransactionAPIView.as_view(), name="transactions-sign"),
+    path("sign-transaction/", SignTransactionAPIView.as_view(), name="sign-transaction"),
     
     # Transaction checking & mempool ingestion aliases
     path("transactions/validate/", CheckTransactionAPIView.as_view(), name="wallet-transactions-validate"),
-    path("transactions/check/", CheckTransactionAPIView.as_view(), name="wallet-transactions-check"),
 ]
