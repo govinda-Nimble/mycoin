@@ -87,9 +87,6 @@ secrets/
 #migrations files
 #migrations/
 
-migrations_old/
-migrations_old/*
-
 
 # ============================================================
 # Testing / Coverage

@@ -1,0 +1,70 @@
+python manage.py collectstatic
+python manage.py makemigrations
+python manage.py migrate
+
+python manage.py createsuperuser
+admin@gmail.com
+Govinda
+prasad
+admin@1234
+admin@1234
+
+
+
+# step blockchain and genesis blocks
+python manage.py initialize_blockchain
+
+# setup node and validator for now only one
+python manage.py seed_node
+
+
+# start the project
+python manage.py runserver
+
+# start service block producer
+location: sudo nano /etc/systemd/system/mycoin-mempool.service
+
+
+[Unit]
+Description=MYCOIN Mempool Processor and Block Producer
+After=network.target
+
+[Service]
+Type=simple
+
+User=nimble
+Group=www-data
+
+WorkingDirectory=/var/www/mycoin/backend
+
+EnvironmentFile=/var/www/mycoin/backend/.env.local
+
+ExecStart=/var/www/mycoin/backend/venv/bin/python manage.py run_mempool_processor --interval 60 --batch-size 5
+
+Restart=always
+RestartSec=5
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+Managing the Service:
+# Reload systemd to detect the new service
+sudo systemctl daemon-reload
+# Enable service to start automatically on system reboot
+sudo systemctl enable mycoin-mempool
+# Start the service now
+sudo systemctl start mycoin-mempool
+# Check status
+sudo systemctl status mycoin-mempool
+# View real-time live logs
+sudo journalctl -u mycoin-mempool -f
+
+sudo systemctl stop mycoin-mempool
